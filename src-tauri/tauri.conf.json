@@ -1,5 +1,5 @@
 {
-  "productName": "Schülerbeobachtung",
+  "productName": "Schuelerbeobachtung",
   "version": "0.1.0",
   "identifier": "com.school.schuelerbeobachtung",
   "build": {
@@ -15,7 +15,7 @@
         "fullscreen": false,
         "height": 700,
         "resizable": true,
-        "title": "Schülerbeobachtung",
+        "title": "Schuelerbeobachtung",
         "width": 1000,
         "minWidth": 800,
         "minHeight": 600
@@ -33,7 +33,7 @@
     "category": "Education",
     "copyright": "",
     "externalBin": [],
-    "icon": [],
+    "icon": ["icons/icon.png"],
     "longDescription": "GDPR-compliant student observation system with P2P synchronization",
     "macOS": {
       "entitlements": null,
