@@ -1,0 +1,223 @@
+import { create } from 'zustand';
+import { invoke } from '@tauri-apps/api/core';
+
+export interface Student {
+  id: number;
+  class_id: number;
+  first_name: string;
+  last_name: string;
+  status: string;
+}
+
+export interface Class {
+  id: number;
+  name: string;
+  school_year: string;
+}
+
+export interface Observation {
+  id: number;
+  student_id: number;
+  author_id: number;
+  category: string;
+  text: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+  source_device_id: string;
+}
+
+export interface SyncStatus {
+  peer_connected: boolean;
+  last_sync: string | null;
+  pending_changes: number;
+}
+
+interface AppState {
+  // Data
+  students: Student[];
+  classes: Class[];
+  observations: Observation[];
+  
+  // UI State
+  loading: boolean;
+  error: string | null;
+  syncStatus: SyncStatus | null;
+  
+  // Actions
+  initializeApp: () => Promise<void>;
+  loadStudents: () => Promise<void>;
+  loadClasses: () => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  createObservation: (data: {
+    student_id: number;
+    category: string;
+    text: string;
+    tags: string[];
+  }) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  searchObservations: (query?: string, student_id?: number, category?: string) => Promise<void>;
+  getSyncStatus: () => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  exportStudentData: (student_id: number, format: string) => Promise<string>;
+  // eslint-disable-next-line no-unused-vars
+  createClass: (name: string, school_year: string) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  createStudent: (class_id: number, first_name: string, last_name: string, status?: string) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  setError: (error: string | null) => void;
+  // eslint-disable-next-line no-unused-vars
+  setLoading: (loading: boolean) => void;
+}
+
+export const useAppStore = create<AppState>((set, get) => ({
+  // Initial state
+  students: [],
+  classes: [],
+  observations: [],
+  loading: false,
+  error: null,
+  syncStatus: null,
+
+  // Actions
+  initializeApp: async () => {
+    const { loadStudents, loadClasses, getSyncStatus } = get();
+    set({ loading: true, error: null });
+    
+    try {
+      await Promise.all([
+        loadStudents(),
+        loadClasses(),
+        getSyncStatus(),
+      ]);
+    } catch (error) {
+      set({ error: `Initialization failed: ${error}` });
+    } finally {
+      set({ loading: false });
+    }
+  },
+
+  loadStudents: async () => {
+    try {
+      const students = await invoke('get_students') as Student[];
+      set({ students, error: null });
+    } catch (error) {
+      set({ error: `Failed to load students: ${error}` });
+      throw error;
+    }
+  },
+
+  loadClasses: async () => {
+    try {
+      const classes = await invoke('get_classes') as Class[];
+      set({ classes, error: null });
+    } catch (error) {
+      set({ error: `Failed to load classes: ${error}` });
+      throw error;
+    }
+  },
+
+  createObservation: async (data) => {
+    set({ loading: true, error: null });
+    
+    try {
+      const observation = await invoke('create_observation', {
+        studentId: data.student_id,
+        category: data.category,
+        text: data.text,
+        tags: data.tags,
+      }) as Observation;
+      
+      const { observations } = get();
+      set({ 
+        observations: [observation, ...observations],
+        loading: false,
+        error: null 
+      });
+    } catch (err) {
+      set({ 
+        error: `Failed to create observation: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  searchObservations: async (query?, student_id?, category?) => {
+    set({ loading: true, error: null });
+    
+    try {
+      const observations = await invoke('search_observations', {
+        query: query || null,
+        studentId: student_id || null,
+        category: category || null,
+      }) as Observation[];
+      
+      set({ observations, loading: false, error: null });
+    } catch (err) {
+      set({ 
+        error: `Failed to search observations: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  getSyncStatus: async () => {
+    try {
+      const syncStatus = await invoke('get_sync_status') as SyncStatus;
+      set({ syncStatus, error: null });
+    } catch (error) {
+      set({ error: `Failed to get sync status: ${error}` });
+    }
+  },
+
+  exportStudentData: async (student_id, format) => {
+    set({ loading: true, error: null });
+    
+    try {
+      const exportData = await invoke('export_student_data', {
+        studentId: student_id,
+        format,
+      }) as string;
+      
+      set({ loading: false, error: null });
+      return exportData;
+    } catch (err) {
+      set({ 
+        error: `Failed to export student data: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  // Create a class
+  createClass: async (name: string, school_year: string) => {
+    set({ loading: true, error: null });
+    try {
+      const newClass = await invoke('create_class', { name, schoolYear: school_year });
+      const { classes } = get();
+      set({ classes: [newClass as any, ...classes], loading: false });
+    } catch (err) {
+      set({ error: `Failed to create class: ${err}`, loading: false });
+      throw err;
+    }
+  },
+
+  // Create a student
+  createStudent: async (class_id: number, first_name: string, last_name: string, status: string = 'active') => {
+    set({ loading: true, error: null });
+    try {
+      const newStudent = await invoke('create_student', { classId: class_id, firstName: first_name, lastName: last_name, status });
+      const { students } = get();
+      set({ students: [newStudent as any, ...students], loading: false });
+    } catch (err) {
+      set({ error: `Failed to create student: ${err}`, loading: false });
+      throw err;
+    }
+  },
+
+  setError: (error) => set({ error }),
+  setLoading: (loading) => set({ loading }),
+}));

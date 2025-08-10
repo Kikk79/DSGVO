@@ -1,0 +1,64 @@
+{
+  "productName": "Schülerbeobachtung",
+  "version": "0.1.0",
+  "identifier": "com.school.schuelerbeobachtung",
+  "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "fullscreen": false,
+        "height": 700,
+        "resizable": true,
+        "title": "Schülerbeobachtung",
+        "width": 1000,
+        "minWidth": 800,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' data: https: tauri: 'unsafe-eval' 'unsafe-inline'; media-src 'self' https: tauri:",
+      "capabilities": [
+        "main"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "Education",
+    "copyright": "",
+    "externalBin": [],
+    "icon": [],
+    "longDescription": "GDPR-compliant student observation system with P2P synchronization",
+    "macOS": {
+      "entitlements": null,
+      "exceptionDomain": "",
+      "frameworks": [],
+      "providerShortName": null,
+      "signingIdentity": null
+    },
+    "resources": [],
+    "shortDescription": "Student observation system",
+    "targets": "all",
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": false
+    }
+  }
+}
