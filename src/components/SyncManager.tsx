@@ -15,10 +15,22 @@ import { format } from 'date-fns';
 import { de } from 'date-fns/locale';
 
 export const SyncManager: React.FC = () => {
-  const { syncStatus, getSyncStatus } = useAppStore();
+  const { 
+    syncStatus, 
+    getSyncStatus, 
+    startP2PSync, 
+    stopP2PSync, 
+    pairDevice, 
+    triggerSync, 
+    exportChangeset, 
+    importChangeset,
+    loading,
+    error
+  } = useAppStore();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showPairing, setShowPairing] = useState(false);
   const [pairingCode, setPairingCode] = useState('');
+  const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   useEffect(() => {
     getSyncStatus();
@@ -33,6 +45,69 @@ export const SyncManager: React.FC = () => {
     setTimeout(() => setIsRefreshing(false), 1000);
   };
 
+  const showNotification = (type: 'success' | 'error', message: string) => {
+    setNotification({ type, message });
+    setTimeout(() => setNotification(null), 5000);
+  };
+
+  const handlePairDevice = async () => {
+    if (!pairingCode.trim()) return;
+    
+    try {
+      await pairDevice(pairingCode.trim());
+      showNotification('success', 'Gerät erfolgreich gekoppelt!');
+      setPairingCode('');
+      setShowPairing(false);
+    } catch (error) {
+      showNotification('error', `Fehler beim Koppeln: ${error}`);
+    }
+  };
+
+  const handleTriggerSync = async () => {
+    try {
+      await triggerSync();
+      showNotification('success', 'Synchronisation erfolgreich abgeschlossen!');
+    } catch (error) {
+      showNotification('error', `Synchronisation fehlgeschlagen: ${error}`);
+    }
+  };
+
+  const handleExportChangeset = async () => {
+    try {
+      const changeset = await exportChangeset();
+      // Create and download file
+      const blob = new Blob([changeset], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `changeset-${new Date().toISOString().split('T')[0]}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showNotification('success', 'Änderungspaket erfolgreich exportiert!');
+    } catch (error) {
+      showNotification('error', `Export fehlgeschlagen: ${error}`);
+    }
+  };
+
+  const handleImportChangeset = async () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.txt';
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (file) {
+        try {
+          const content = await file.text();
+          await importChangeset(content);
+          showNotification('success', 'Änderungspaket erfolgreich importiert!');
+        } catch (error) {
+          showNotification('error', `Import fehlgeschlagen: ${error}`);
+        }
+      }
+    };
+    input.click();
+  };
+
   const getConnectionStatus = () => {
     if (!syncStatus) return { status: 'unknown', color: 'gray', text: 'Unbekannt' };
     if (syncStatus.peer_connected) return { status: 'connected', color: 'green', text: 'Verbunden' };
@@ -44,6 +119,39 @@ export const SyncManager: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Notification */}
+      {notification && (
+        <div className={`p-4 rounded-md ${
+          notification.type === 'success' 
+            ? 'bg-green-50 border border-green-200 text-green-700' 
+            : 'bg-red-50 border border-red-200 text-red-700'
+        }`}>
+          <div className="flex">
+            {notification.type === 'success' ? (
+              <CheckCircle className="h-5 w-5 mr-2 mt-0.5" />
+            ) : (
+              <AlertCircle className="h-5 w-5 mr-2 mt-0.5" />
+            )}
+            <div>
+              <p className="font-medium">{notification.message}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Error Display */}
+      {error && (
+        <div className="p-4 rounded-md bg-red-50 border border-red-200 text-red-700">
+          <div className="flex">
+            <AlertCircle className="h-5 w-5 mr-2 mt-0.5" />
+            <div>
+              <p className="font-medium">Fehler</p>
+              <p className="text-sm">{error}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
@@ -211,10 +319,18 @@ export const SyncManager: React.FC = () => {
                   className="input-field"
                 />
                 <button
-                  disabled={!pairingCode.trim()}
-                  className="btn-primary mt-2 w-full"
+                  onClick={handlePairDevice}
+                  disabled={!pairingCode.trim() || loading}
+                  className="btn-primary mt-2 w-full flex items-center justify-center"
                 >
-                  Gerät koppeln
+                  {loading ? (
+                    <>
+                      <div className="animate-spin h-4 w-4 mr-2 border-2 border-white border-t-transparent rounded-full" />
+                      Koppelt...
+                    </>
+                  ) : (
+                    'Gerät koppeln'
+                  )}
                 </button>
               </div>
 
@@ -238,20 +354,40 @@ export const SyncManager: React.FC = () => {
       <div className="card">
         <h2 className="text-lg font-medium text-gray-900 mb-4">Sync-Aktionen</h2>
         
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <button className="btn-secondary flex items-center justify-center p-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <button 
+            onClick={handleTriggerSync}
+            disabled={loading}
+            className="btn-secondary flex items-center justify-center p-4"
+          >
             <Download className="h-5 w-5 mr-3" aria-hidden="true" />
             <div className="text-left">
-              <div className="font-medium">Daten abrufen</div>
-              <div className="text-sm text-gray-600">Neue Beobachtungen vom Notebook laden</div>
+              <div className="font-medium">Daten synchronisieren</div>
+              <div className="text-sm text-gray-600">Bidirektionale Synchronisation starten</div>
             </div>
           </button>
           
-          <button className="btn-secondary flex items-center justify-center p-4">
+          <button 
+            onClick={() => startP2PSync()}
+            disabled={loading}
+            className="btn-secondary flex items-center justify-center p-4"
+          >
             <Upload className="h-5 w-5 mr-3" aria-hidden="true" />
             <div className="text-left">
-              <div className="font-medium">Daten senden</div>
-              <div className="text-sm text-gray-600">Änderungen an Notebook übertragen</div>
+              <div className="font-medium">P2P starten</div>
+              <div className="text-sm text-gray-600">Peer-to-Peer Verbindung aktivieren</div>
+            </div>
+          </button>
+
+          <button 
+            onClick={() => stopP2PSync()}
+            disabled={loading}
+            className="btn-danger flex items-center justify-center p-4"
+          >
+            <WifiOff className="h-5 w-5 mr-3" aria-hidden="true" />
+            <div className="text-left">
+              <div className="font-medium">P2P stoppen</div>
+              <div className="text-sm text-gray-600">Peer-to-Peer Verbindung beenden</div>
             </div>
           </button>
         </div>
@@ -266,10 +402,24 @@ export const SyncManager: React.FC = () => {
         </p>
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <button className="btn-secondary">
+          <button 
+            onClick={handleExportChangeset}
+            disabled={loading}
+            className="btn-secondary flex items-center justify-center"
+          >
+            {loading ? (
+              <div className="animate-spin h-4 w-4 mr-2 border-2 border-gray-600 border-t-transparent rounded-full" />
+            ) : (
+              <Download className="h-4 w-4 mr-2" />
+            )}
             Änderungspaket exportieren
           </button>
-          <button className="btn-secondary">
+          <button 
+            onClick={handleImportChangeset}
+            disabled={loading}
+            className="btn-secondary flex items-center justify-center"
+          >
+            <Upload className="h-4 w-4 mr-2" />
             Änderungspaket importieren
           </button>
         </div>
