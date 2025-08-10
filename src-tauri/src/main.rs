@@ -10,6 +10,7 @@ mod gdpr;
 use tauri::Manager;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use base64::Engine;
 
 // Data structures
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -163,6 +164,97 @@ async fn export_student_data(
     }
 }
 
+#[tauri::command]
+async fn start_p2p_sync(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut p2p_guard = state.p2p.lock().await;
+    if p2p_guard.is_none() {
+        let p2p_manager = p2p::P2PManager::new(state.crypto.clone(), state.db.clone())
+            .map_err(|e| e.to_string())?;
+        *p2p_guard = Some(p2p_manager);
+    }
+    
+    if let Some(p2p) = p2p_guard.as_mut() {
+        p2p.start_discovery().await.map_err(|e| e.to_string())?;
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_p2p_sync(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut p2p_guard = state.p2p.lock().await;
+    if let Some(p2p) = p2p_guard.as_mut() {
+        p2p.stop_discovery().await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn pair_device(
+    state: tauri::State<'_, AppState>,
+    pairing_code: String,
+) -> Result<(), String> {
+    let mut p2p_guard = state.p2p.lock().await;
+    if let Some(p2p) = p2p_guard.as_mut() {
+        p2p.pair_with_device(&pairing_code).await.map_err(|e| e.to_string())?;
+        
+        // Log the pairing action
+        state.audit.log_action("pair", "device", 0, 1, Some(&pairing_code)).await
+            .map_err(|e| e.to_string())?;
+    } else {
+        return Err("P2P not initialized".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn trigger_sync(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut p2p_guard = state.p2p.lock().await;
+    if let Some(p2p) = p2p_guard.as_mut() {
+        p2p.sync_with_peers().await.map_err(|e| e.to_string())?;
+        
+        // Log the sync action
+        state.audit.log_action("sync", "data", 0, 1, None).await
+            .map_err(|e| e.to_string())?;
+    } else {
+        return Err("P2P not initialized".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn export_changeset(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let db = state.db.lock().await;
+    let changeset = db.get_pending_changesets("export").await.map_err(|e| e.to_string())?;
+    
+    // Convert to base64 for safe transport
+    let encoded = base64::prelude::BASE64_STANDARD.encode(&changeset);
+    
+    // Log the export
+    state.audit.log_action("export", "changeset", 0, 1, None).await
+        .map_err(|e| e.to_string())?;
+    
+    Ok(encoded)
+}
+
+#[tauri::command]
+async fn import_changeset(
+    state: tauri::State<'_, AppState>,
+    changeset_data: String,
+) -> Result<(), String> {
+    let changeset = base64::prelude::BASE64_STANDARD.decode(&changeset_data)
+        .map_err(|e| format!("Invalid changeset format: {}", e))?;
+    
+    let db = state.db.lock().await;
+    db.apply_changeset(&changeset, "import").await.map_err(|e| e.to_string())?;
+    
+    // Log the import
+    state.audit.log_action("import", "changeset", 0, 1, None).await
+        .map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
 fn main() {
     // A simple logger that prints to the console
     env_logger::init();
@@ -213,7 +305,13 @@ fn main() {
             search_observations,
             export_student_data,
             create_class,
-            create_student
+            create_student,
+            start_p2p_sync,
+            stop_p2p_sync,
+            pair_device,
+            trigger_sync,
+            export_changeset,
+            import_changeset
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

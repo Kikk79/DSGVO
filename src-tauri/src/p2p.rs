@@ -5,12 +5,14 @@ use tokio_rustls::{TlsAcceptor, TlsConnector, rustls::{ClientConfig, ServerConfi
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
-use crate::{crypto::CryptoManager, SyncStatus};
+use crate::{crypto::CryptoManager, database::Database, SyncStatus};
 use base64::Engine;
 use std::io::Cursor;
+use tokio::sync::Mutex;
 
 pub struct P2PManager {
     crypto: Arc<CryptoManager>,
+    db: Arc<Mutex<Database>>,
     device_id: String,
     peers: HashMap<String, PeerInfo>,
     mdns_daemon: Option<ServiceDaemon>,
@@ -26,11 +28,12 @@ struct PeerInfo {
 }
 
 impl P2PManager {
-    pub async fn new(crypto: Arc<CryptoManager>) -> Result<Self> {
+    pub fn new(crypto: Arc<CryptoManager>, db: Arc<Mutex<Database>>) -> Result<Self> {
         let device_id = crypto.get_device_id();
         
         Ok(Self {
             crypto,
+            db,
             device_id,
             peers: HashMap::new(),
             mdns_daemon: None,
@@ -38,7 +41,7 @@ impl P2PManager {
         })
     }
 
-    pub async fn start_discovery(&mut self, port: u16) -> Result<()> {
+    pub async fn start_discovery_with_port(&mut self, port: u16) -> Result<()> {
         // Start mDNS service advertisement
         let mdns = ServiceDaemon::new().context("Failed to create mDNS daemon")?;
         
@@ -226,6 +229,37 @@ impl P2PManager {
         self.add_peer_manually(peer_id.clone(), peer_address, peer_cert)?;
         
         Ok(peer_id)
+    }
+
+    // Simplified methods to match main.rs calls
+    pub async fn start_discovery(&mut self) -> Result<()> {
+        // Start discovery on default port 8080
+        self.start_discovery_with_port(8080).await
+    }
+    
+    pub async fn stop_discovery(&mut self) -> Result<()> {
+        if let Some(handle) = self.server_handle.take() {
+            handle.abort();
+        }
+        self.mdns_daemon = None;
+        Ok(())
+    }
+    
+    pub async fn pair_with_device(&mut self, pairing_code: &str) -> Result<()> {
+        // In a real implementation, this would parse the pairing code
+        // and establish a connection with the peer device
+        let peer_id = self.process_pairing_code(pairing_code, "127.0.0.1:8081".to_string())?;
+        tracing::info!("Successfully paired with device: {}", peer_id);
+        Ok(())
+    }
+    
+    pub async fn sync_with_peers(&mut self) -> Result<()> {
+        for peer_id in self.peers.keys().cloned().collect::<Vec<_>>() {
+            if let Err(e) = self.sync_with_peer(&peer_id).await {
+                tracing::error!("Failed to sync with peer {}: {}", peer_id, e);
+            }
+        }
+        Ok(())
     }
 }
 

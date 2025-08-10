@@ -68,6 +68,16 @@ interface AppState {
   setError: (error: string | null) => void;
   // eslint-disable-next-line no-unused-vars
   setLoading: (loading: boolean) => void;
+  
+  // P2P Sync Functions
+  startP2PSync: () => Promise<void>;
+  stopP2PSync: () => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  pairDevice: (pairingCode: string) => Promise<void>;
+  triggerSync: () => Promise<void>;
+  exportChangeset: () => Promise<string>;
+  // eslint-disable-next-line no-unused-vars
+  importChangeset: (changesetData: string) => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -220,4 +230,105 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setError: (error) => set({ error }),
   setLoading: (loading) => set({ loading }),
+
+  // P2P Sync implementations
+  startP2PSync: async () => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('start_p2p_sync');
+      set({ loading: false, error: null });
+    } catch (err) {
+      set({ 
+        error: `Failed to start P2P sync: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  stopP2PSync: async () => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('stop_p2p_sync');
+      set({ loading: false, error: null });
+    } catch (err) {
+      set({ 
+        error: `Failed to stop P2P sync: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  pairDevice: async (pairingCode: string) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('pair_device', { pairingCode });
+      // Refresh sync status after successful pairing
+      await get().getSyncStatus();
+      set({ loading: false, error: null });
+    } catch (err) {
+      set({ 
+        error: `Failed to pair device: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  triggerSync: async () => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('trigger_sync');
+      // Refresh data after sync
+      await Promise.all([
+        get().searchObservations(),
+        get().loadStudents(),
+        get().getSyncStatus()
+      ]);
+      set({ loading: false, error: null });
+    } catch (err) {
+      set({ 
+        error: `Failed to sync: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  exportChangeset: async (): Promise<string> => {
+    set({ loading: true, error: null });
+    try {
+      const changeset = await invoke('export_changeset') as string;
+      set({ loading: false, error: null });
+      return changeset;
+    } catch (err) {
+      set({ 
+        error: `Failed to export changeset: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  importChangeset: async (changesetData: string) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('import_changeset', { changesetData });
+      // Refresh all data after import
+      await Promise.all([
+        get().searchObservations(),
+        get().loadStudents(),
+        get().loadClasses(),
+        get().getSyncStatus()
+      ]);
+      set({ loading: false, error: null });
+    } catch (err) {
+      set({ 
+        error: `Failed to import changeset: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
 }));
