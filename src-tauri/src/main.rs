@@ -22,6 +22,12 @@ pub struct Student {
     pub status: String,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct DeviceConfig {
+    pub device_type: String, // "computer" or "notebook"
+    pub device_name: Option<String>,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Class {
     pub id: i64,
@@ -255,6 +261,34 @@ async fn import_changeset(
     Ok(())
 }
 
+#[tauri::command]
+async fn get_device_config(state: tauri::State<'_, AppState>) -> Result<DeviceConfig, String> {
+    let config = state.crypto.get_device_config().await
+        .map_err(|e| e.to_string())?;
+    Ok(config)
+}
+
+#[tauri::command]
+async fn set_device_config(
+    state: tauri::State<'_, AppState>,
+    device_type: String,
+    device_name: Option<String>,
+) -> Result<(), String> {
+    let config = DeviceConfig {
+        device_type,
+        device_name,
+    };
+    
+    state.crypto.set_device_config(&config).await
+        .map_err(|e| e.to_string())?;
+    
+    // Log the configuration change
+    state.audit.log_action("update", "device_config", 0, 1, Some(&config.device_type)).await
+        .map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
 fn main() {
     // A simple logger that prints to the console
     env_logger::init();
@@ -311,7 +345,9 @@ fn main() {
             pair_device,
             trigger_sync,
             export_changeset,
-            import_changeset
+            import_changeset,
+            get_device_config,
+            set_device_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

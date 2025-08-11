@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Shield, 
   Database, 
@@ -9,18 +9,40 @@ import {
   AlertTriangle,
   Settings,
   Lock,
-  FileText
+  FileText,
+  Monitor,
+  Laptop
 } from 'lucide-react';
+import { useAppStore } from '../stores/appStore';
 
 export const SettingsPage: React.FC = () => {
+  const { deviceConfig, setDeviceConfig, loading } = useAppStore();
   const [notifications, setNotifications] = useState(true);
   const [autoBackup, setAutoBackup] = useState(true);
   const [dataRetention, setDataRetention] = useState('365');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [localDeviceType, setLocalDeviceType] = useState<'computer' | 'notebook'>('computer');
+  const [localDeviceName, setLocalDeviceName] = useState('');
+
+  // Initialize local state from device config
+  useEffect(() => {
+    if (deviceConfig) {
+      setLocalDeviceType(deviceConfig.device_type);
+      setLocalDeviceName(deviceConfig.device_name || '');
+    }
+  }, [deviceConfig]);
 
   const handleDataExport = () => {
     // Implementation would trigger full data export
     console.log('Exporting all data...');
+  };
+
+  const handleDeviceConfigSave = async () => {
+    try {
+      await setDeviceConfig(localDeviceType, localDeviceName || undefined);
+    } catch (error) {
+      console.error('Failed to save device config:', error);
+    }
   };
 
   const handleDataDeletion = () => {
@@ -204,6 +226,122 @@ export const SettingsPage: React.FC = () => {
               Sichere Lage außerhalb des Benutzerverzeichnisses
             </p>
           </div>
+        </div>
+      </div>
+
+      {/* Device Configuration */}
+      <div className="card">
+        <div className="card-header">
+          <h2 className="text-lg font-medium text-gray-900 flex items-center">
+            <Settings className="h-5 w-5 mr-2" aria-hidden="true" />
+            Gerätekonfiguration
+          </h2>
+        </div>
+
+        <div className="space-y-6">
+          {/* Device Type Selection */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-3">
+              Gerätetyp
+            </label>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setLocalDeviceType('computer')}
+                className={`p-4 border-2 rounded-lg transition-colors ${
+                  localDeviceType === 'computer'
+                    ? 'border-blue-500 bg-blue-50 text-blue-900'
+                    : 'border-gray-200 hover:border-gray-300 bg-white text-gray-700'
+                }`}
+              >
+                <div className="flex items-center justify-center mb-2">
+                  <Monitor className="h-8 w-8" />
+                </div>
+                <div className="text-center">
+                  <div className="font-medium">Computer</div>
+                  <div className="text-sm mt-1 opacity-75">
+                    Desktop-Arbeitsplatz (Zuhause)
+                  </div>
+                </div>
+              </button>
+              
+              <button
+                type="button"
+                onClick={() => setLocalDeviceType('notebook')}
+                className={`p-4 border-2 rounded-lg transition-colors ${
+                  localDeviceType === 'notebook'
+                    ? 'border-blue-500 bg-blue-50 text-blue-900'
+                    : 'border-gray-200 hover:border-gray-300 bg-white text-gray-700'
+                }`}
+              >
+                <div className="flex items-center justify-center mb-2">
+                  <Laptop className="h-8 w-8" />
+                </div>
+                <div className="text-center">
+                  <div className="font-medium">Notebook</div>
+                  <div className="text-sm mt-1 opacity-75">
+                    Mobiles Gerät (Schule)
+                  </div>
+                </div>
+              </button>
+            </div>
+          </div>
+
+          {/* Device Name (Optional) */}
+          <div>
+            <label htmlFor="device-name" className="block text-sm font-medium text-gray-700 mb-1">
+              Gerätename (Optional)
+            </label>
+            <input
+              type="text"
+              id="device-name"
+              value={localDeviceName}
+              onChange={(e) => setLocalDeviceName(e.target.value)}
+              placeholder="z.B. Mein Arbeitsplatz, Schul-Laptop..."
+              className="input-field"
+            />
+            <p className="text-sm text-gray-500 mt-1">
+              Ein benutzerdefinierter Name für dieses Gerät in der Synchronisation.
+            </p>
+          </div>
+
+          {/* Save Button */}
+          <div>
+            <button
+              onClick={handleDeviceConfigSave}
+              disabled={loading}
+              className="btn-primary flex items-center"
+            >
+              {loading ? (
+                <>
+                  <div className="animate-spin h-4 w-4 mr-2 border-2 border-white border-t-transparent rounded-full" />
+                  Speichern...
+                </>
+              ) : (
+                'Konfiguration speichern'
+              )}
+            </button>
+          </div>
+
+          {/* Current Configuration Display */}
+          {deviceConfig && (
+            <div className="bg-green-50 border border-green-200 rounded-md p-4">
+              <div className="flex">
+                <Settings className="h-5 w-5 text-green-400 mt-0.5 mr-3" aria-hidden="true" />
+                <div>
+                  <h3 className="text-sm font-medium text-green-800">
+                    Aktuelle Konfiguration
+                  </h3>
+                  <p className="text-sm text-green-700 mt-1">
+                    Gerätetyp: <strong>{deviceConfig.device_type === 'computer' ? 'Computer' : 'Notebook'}</strong>
+                    {deviceConfig.device_name && (
+                      <span> • Name: <strong>{deviceConfig.device_name}</strong></span>
+                    )}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

@@ -25,7 +25,8 @@ export const SyncManager: React.FC = () => {
     exportChangeset, 
     importChangeset,
     loading,
-    error
+    error,
+    deviceConfig
   } = useAppStore();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showPairing, setShowPairing] = useState(false);
@@ -117,6 +118,66 @@ export const SyncManager: React.FC = () => {
 
   const connectionStatus = getConnectionStatus();
 
+  // Helper functions to get device display information
+  const getThisDeviceInfo = () => {
+    if (!deviceConfig) {
+      return {
+        icon: Monitor,
+        name: 'Dieses Gerät',
+        type: 'Desktop-Arbeitsplatz',
+        description: 'Computer (Zuhause)',
+      };
+    }
+
+    if (deviceConfig.device_type === 'notebook') {
+      return {
+        icon: Smartphone,
+        name: deviceConfig.device_name || 'Dieses Gerät',
+        type: 'Notebook (Schule)',
+        description: 'Mobiles Gerät',
+      };
+    }
+
+    return {
+      icon: Monitor,
+      name: deviceConfig.device_name || 'Dieses Gerät',
+      type: 'Desktop-Arbeitsplatz',
+      description: 'Computer (Zuhause)',
+    };
+  };
+
+  const getPeerDeviceInfo = () => {
+    if (!deviceConfig) {
+      return {
+        icon: Smartphone,
+        name: 'Notebook',
+        type: 'Notebook (Schule)',
+        description: 'Mobiles Gerät',
+      };
+    }
+
+    // If this is a notebook, the peer is likely a computer
+    if (deviceConfig.device_type === 'notebook') {
+      return {
+        icon: Monitor,
+        name: 'Computer',
+        type: 'Desktop-Arbeitsplatz',
+        description: 'Computer (Zuhause)',
+      };
+    }
+
+    // If this is a computer, the peer is likely a notebook
+    return {
+      icon: Smartphone,
+      name: 'Notebook',
+      type: 'Notebook (Schule)',
+      description: 'Mobiles Gerät',
+    };
+  };
+
+  const thisDevice = getThisDeviceInfo();
+  const peerDevice = getPeerDeviceInfo();
+
   return (
     <div className="space-y-6">
       {/* Notification */}
@@ -195,17 +256,17 @@ export const SyncManager: React.FC = () => {
           {/* This Device */}
           <div className="border rounded-lg p-4">
             <div className="flex items-center mb-3">
-              <Monitor className="h-6 w-6 text-blue-600 mr-3" aria-hidden="true" />
+              <thisDevice.icon className="h-6 w-6 text-blue-600 mr-3" aria-hidden="true" />
               <div>
-                <h3 className="font-medium text-gray-900">Dieses Gerät</h3>
-                <p className="text-sm text-gray-500">Desktop-Arbeitsplatz</p>
+                <h3 className="font-medium text-gray-900">{thisDevice.name}</h3>
+                <p className="text-sm text-gray-500">{thisDevice.description}</p>
               </div>
             </div>
             
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <span className="text-gray-600">Typ:</span>
-                <span className="text-gray-900">Haupt-Arbeitsplatz</span>
+                <span className="text-gray-900">{thisDevice.type}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-600">Status:</span>
@@ -217,9 +278,9 @@ export const SyncManager: React.FC = () => {
           {/* Peer Device */}
           <div className="border rounded-lg p-4">
             <div className="flex items-center mb-3">
-              <Smartphone className="h-6 w-6 text-gray-400 mr-3" aria-hidden="true" />
+              <peerDevice.icon className="h-6 w-6 text-gray-400 mr-3" aria-hidden="true" />
               <div>
-                <h3 className="font-medium text-gray-900">Notebook</h3>
+                <h3 className="font-medium text-gray-900">{peerDevice.name}</h3>
                 <p className="text-sm text-gray-500">
                   {syncStatus?.peer_connected ? 'Verbunden' : 'Nicht verbunden'}
                 </p>
@@ -229,7 +290,7 @@ export const SyncManager: React.FC = () => {
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <span className="text-gray-600">Typ:</span>
-                <span className="text-gray-900">Notebook (Schule)</span>
+                <span className="text-gray-900">{peerDevice.type}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-600">Status:</span>
@@ -309,7 +370,7 @@ export const SyncManager: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <h3 className="text-sm font-medium text-gray-900 mb-2">
-                  1. Kopplungscode vom Notebook eingeben
+                  1. Kopplungscode vom {peerDevice.name} eingeben
                 </h3>
                 <input
                   type="text"
@@ -341,7 +402,7 @@ export const SyncManager: React.FC = () => {
                 <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
                   <QrCode className="mx-auto h-12 w-12 text-gray-400" />
                   <p className="mt-2 text-sm text-gray-500">
-                    QR-Code vom Notebook hier scannen
+                    QR-Code vom {peerDevice.name} hier scannen
                   </p>
                 </div>
               </div>

@@ -172,4 +172,32 @@ impl CryptoManager {
             }
         }
     }
+
+    pub async fn get_device_config(&self) -> Result<crate::DeviceConfig> {
+        let device_type = secret_get("device_type")?
+            .unwrap_or_else(|| "computer".to_string()); // Default to computer
+        let device_name = secret_get("device_name")?;
+        
+        Ok(crate::DeviceConfig {
+            device_type,
+            device_name,
+        })
+    }
+
+    pub async fn set_device_config(&self, config: &crate::DeviceConfig) -> Result<()> {
+        secret_set("device_type", &config.device_type)
+            .context("Failed to persist device type")?;
+        
+        if let Some(name) = &config.device_name {
+            secret_set("device_name", name)
+                .context("Failed to persist device name")?;
+        } else {
+            // Remove device name if set to None
+            let mut map = load_secrets();
+            map.remove("device_name");
+            save_secrets(&map).context("Failed to remove device name")?;
+        }
+        
+        Ok(())
+    }
 }

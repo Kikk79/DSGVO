@@ -33,6 +33,11 @@ export interface SyncStatus {
   pending_changes: number;
 }
 
+export interface DeviceConfig {
+  device_type: 'computer' | 'notebook';
+  device_name?: string;
+}
+
 interface AppState {
   // Data
   students: Student[];
@@ -43,6 +48,7 @@ interface AppState {
   loading: boolean;
   error: string | null;
   syncStatus: SyncStatus | null;
+  deviceConfig: DeviceConfig | null;
   
   // Actions
   initializeApp: () => Promise<void>;
@@ -78,6 +84,11 @@ interface AppState {
   exportChangeset: () => Promise<string>;
   // eslint-disable-next-line no-unused-vars
   importChangeset: (changesetData: string) => Promise<void>;
+  
+  // Device Configuration
+  getDeviceConfig: () => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  setDeviceConfig: (device_type: 'computer' | 'notebook', device_name?: string) => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -88,10 +99,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   loading: false,
   error: null,
   syncStatus: null,
+  deviceConfig: null,
 
   // Actions
   initializeApp: async () => {
-    const { loadStudents, loadClasses, getSyncStatus } = get();
+    const { loadStudents, loadClasses, getSyncStatus, getDeviceConfig } = get();
     set({ loading: true, error: null });
     
     try {
@@ -99,6 +111,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         loadStudents(),
         loadClasses(),
         getSyncStatus(),
+        getDeviceConfig(),
       ]);
     } catch (error) {
       set({ error: `Initialization failed: ${error}` });
@@ -326,6 +339,37 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       set({ 
         error: `Failed to import changeset: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  // Device Configuration implementations
+  getDeviceConfig: async () => {
+    try {
+      const deviceConfig = await invoke('get_device_config') as DeviceConfig;
+      set({ deviceConfig, error: null });
+    } catch (error) {
+      set({ error: `Failed to get device config: ${error}` });
+    }
+  },
+
+  setDeviceConfig: async (device_type: 'computer' | 'notebook', device_name?: string) => {
+    set({ loading: true, error: null });
+    
+    try {
+      await invoke('set_device_config', {
+        deviceType: device_type,
+        deviceName: device_name || null,
+      });
+      
+      // Refresh device config after setting
+      await get().getDeviceConfig();
+      set({ loading: false, error: null });
+    } catch (err) {
+      set({ 
+        error: `Failed to set device config: ${err}`,
         loading: false 
       });
       throw err;
