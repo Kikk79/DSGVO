@@ -150,6 +150,13 @@ npm run tauri build  # Vollständiger Build mit Installer
 - ✅ **Export-Funktionen**: JSON, CSV, PDF mit Audit-Protokollierung
 - ✅ **Daten-Templates**: Wiederverwendbare Beobachtungsvorlagen
 
+#### 🗑️ GDPR-Löschfunktionen
+- ✅ **Differenzierte Löschung**: Soft Delete vs. Hard Delete
+- ✅ **Recht auf Vergessenwerden**: Vollständige Datenlöschung (Art. 17 DSGVO)
+- ✅ **Kaskadierte Löschung**: Automatische Entfernung zugehöriger Daten
+- ✅ **Audit-Protokollierung**: Vollständige Dokumentation aller Löschungen
+- ✅ **UI-Bestätigung**: GDPR-konforme Bestätigungsdialoge mit Aufklärung
+
 ### 🔄 In Entwicklung
 
 #### 🧪 Test-Infrastruktur
@@ -525,6 +532,7 @@ install_mode = "passive"
 ### Benutzer-Dokumentation
 - **Schnellstart-Guide**: Installation und erste Schritte  
 - **Benutzerhandbuch**: Vollständige Funktionsbeschreibung
+- **[Löschfunktionen-Guide](docs/DELETE_FEATURES.md)**: GDPR-konforme Datenlöschung
 - **FAQ**: Häufige Fragen und Problemlösungen
 - **Datenschutz-Leitfaden**: DSGVO-Compliance für Anwender
 - **Troubleshooting**: Diagnose und Fehlerbehebung
@@ -537,7 +545,8 @@ install_mode = "passive"
 - **Security Guidelines**: Sicherheitsbest-practices
 
 ### Entwickler-Dokumentation
-- **API-Referenz**: Tauri-Command Dokumentation
+- **[API-Referenz](docs/API.md)**: Vollständige Tauri-Command Dokumentation
+- **[Löschfunktionen-API](docs/DELETE_FEATURES.md)**: Backend- und Frontend-Implementation
 - **Architektur-Übersicht**: Systemdesign und Komponenten
 - **Beitragsleitfaden**: Code-Standards und PR-Prozess
 - **Testing-Guide**: Test-Setup und Best-Practices

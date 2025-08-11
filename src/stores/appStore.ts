@@ -78,6 +78,10 @@ interface AppState {
   // eslint-disable-next-line no-unused-vars
   createStudent: (class_id: number, first_name: string, last_name: string, status?: string) => Promise<void>;
   // eslint-disable-next-line no-unused-vars
+  deleteStudent: (student_id: number, force_delete?: boolean) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  deleteClass: (class_id: number, force_delete?: boolean) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
   setError: (error: string | null) => void;
   // eslint-disable-next-line no-unused-vars
   setLoading: (loading: boolean) => void;
@@ -250,6 +254,37 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ students: [newStudent as any, ...students], loading: false });
     } catch (err) {
       set({ error: `Failed to create student: ${err}`, loading: false });
+      throw err;
+    }
+  },
+
+  // Delete a student
+  deleteStudent: async (student_id: number, force_delete: boolean = false) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('delete_student', { studentId: student_id, forceDelete: force_delete });
+      // Refresh students list after deletion
+      await get().loadStudents();
+      set({ loading: false });
+    } catch (err) {
+      set({ error: `Failed to delete student: ${err}`, loading: false });
+      throw err;
+    }
+  },
+
+  // Delete a class
+  deleteClass: async (class_id: number, force_delete: boolean = false) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('delete_class', { classId: class_id, forceDelete: force_delete });
+      // Refresh classes and students lists after deletion
+      await Promise.all([
+        get().loadClasses(),
+        get().loadStudents()
+      ]);
+      set({ loading: false });
+    } catch (err) {
+      set({ error: `Failed to delete class: ${err}`, loading: false });
       throw err;
     }
   },

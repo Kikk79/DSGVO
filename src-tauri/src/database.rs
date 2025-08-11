@@ -312,6 +312,90 @@ impl Database {
         Ok(observations)
     }
 
+    pub async fn delete_student(&self, student_id: i64, force_delete: bool) -> Result<()> {
+        // GDPR compliance: Check if student has observations
+        let observation_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM observations WHERE student_id = ?"
+        )
+        .bind(student_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        if observation_count > 0 && !force_delete {
+            // Soft delete: mark student as inactive (GDPR-compliant archiving)
+            sqlx::query(
+                "UPDATE students SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+            )
+            .bind(student_id)
+            .execute(&self.pool)
+            .await?;
+        } else if force_delete {
+            // Hard delete: Remove all observations first (Right to be Forgotten)
+            sqlx::query("DELETE FROM attachments WHERE observation_id IN (SELECT id FROM observations WHERE student_id = ?)")
+                .bind(student_id)
+                .execute(&self.pool)
+                .await?;
+            
+            sqlx::query("DELETE FROM observations WHERE student_id = ?")
+                .bind(student_id)
+                .execute(&self.pool)
+                .await?;
+            
+            sqlx::query("DELETE FROM students WHERE id = ?")
+                .bind(student_id)
+                .execute(&self.pool)
+                .await?;
+        } else {
+            // Safe delete: No observations, can remove student record
+            sqlx::query("DELETE FROM students WHERE id = ?")
+                .bind(student_id)
+                .execute(&self.pool)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn delete_class(&self, class_id: i64, force_delete: bool) -> Result<()> {
+        // Check if class has students
+        let student_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM students WHERE class_id = ? AND status = 'active'"
+        )
+        .bind(class_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        if student_count > 0 && !force_delete {
+            return Err(anyhow::anyhow!(
+                "Cannot delete class with active students. {} students found. Use force_delete to override.",
+                student_count
+            ));
+        }
+
+        if force_delete {
+            // Get all students in this class
+            let student_ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM students WHERE class_id = ?"
+            )
+            .bind(class_id)
+            .fetch_all(&self.pool)
+            .await?;
+
+            // Delete all students and their data
+            for student_id in student_ids {
+                self.delete_student(student_id, true).await?;
+            }
+        }
+
+        // Delete the class
+        sqlx::query("DELETE FROM classes WHERE id = ?")
+            .bind(class_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn get_pending_changesets(&self, peer_id: &str) -> Result<Vec<u8>> {
         // This would implement SQLite session/changeset functionality
         // For now, return empty changeset

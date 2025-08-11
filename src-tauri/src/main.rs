@@ -338,6 +338,46 @@ async fn set_device_config(
     Ok(())
 }
 
+#[tauri::command]
+async fn delete_student(
+    state: tauri::State<'_, AppState>,
+    student_id: i64,
+    force_delete: Option<bool>,
+) -> Result<(), String> {
+    let force_delete = force_delete.unwrap_or(false);
+    let db = state.db.lock().await;
+    
+    // Log the deletion attempt
+    let delete_type = if force_delete { "hard_delete" } else { "soft_delete" };
+    state.audit.log_action("delete", "student", student_id, 1, Some(delete_type)).await
+        .map_err(|e| e.to_string())?;
+    
+    db.delete_student(student_id, force_delete).await
+        .map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_class(
+    state: tauri::State<'_, AppState>,
+    class_id: i64,
+    force_delete: Option<bool>,
+) -> Result<(), String> {
+    let force_delete = force_delete.unwrap_or(false);
+    let db = state.db.lock().await;
+    
+    // Log the deletion attempt
+    let delete_type = if force_delete { "force_delete" } else { "safe_delete" };
+    state.audit.log_action("delete", "class", class_id, 1, Some(delete_type)).await
+        .map_err(|e| e.to_string())?;
+    
+    db.delete_class(class_id, force_delete).await
+        .map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
 fn main() {
     // A simple logger that prints to the console
     env_logger::init();
@@ -389,6 +429,8 @@ fn main() {
             export_student_data,
             create_class,
             create_student,
+            delete_student,
+            delete_class,
             start_p2p_sync,
             stop_p2p_sync,
             pair_device,
