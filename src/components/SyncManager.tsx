@@ -30,7 +30,8 @@ export const SyncManager: React.FC = () => {
     currentPin,
     generatePairingPin,
     getCurrentPairingPin,
-    clearPairingPin
+    clearPairingPin,
+    getPairingCode
   } = useAppStore();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showPairing, setShowPairing] = useState(false);
@@ -155,6 +156,16 @@ export const SyncManager: React.FC = () => {
       showNotification('success', 'PIN erfolgreich gelöscht!');
     } catch (error) {
       showNotification('error', `PIN-Löschung fehlgeschlagen: ${error}`);
+    }
+  };
+
+  const handleGetPairingCode = async () => {
+    try {
+      const code = await getPairingCode();
+      await navigator.clipboard.writeText(code);
+      showNotification('success', 'Vollständiger Kopplungscode in Zwischenablage kopiert!');
+    } catch (error) {
+      showNotification('error', `Fehler beim Kopieren: ${error}`);
     }
   };
 
@@ -454,43 +465,44 @@ export const SyncManager: React.FC = () => {
               {/* Generate PIN Section */}
               <div>
                 <h3 className="text-sm font-medium text-gray-900 mb-3">
-                  Option 1: PIN generieren
+                  Option 1: Kopplungscode erstellen
                 </h3>
                 <div className="space-y-3">
                   <p className="text-sm text-gray-600">
-                    Generieren Sie eine 6-stellige PIN für die einfache Gerätekopplung.
+                    Erstellen Sie einen sicheren Kopplungscode für dieses Gerät.
                   </p>
                   <button
-                    onClick={handleGeneratePin}
-                    disabled={loading || (currentPin !== null && remainingSeconds > 0)}
+                    onClick={handleGetPairingCode}
+                    disabled={loading}
                     className="btn-primary w-full flex items-center justify-center"
                   >
                     {loading ? (
                       <>
                         <div className="animate-spin h-4 w-4 mr-2 border-2 border-white border-t-transparent rounded-full" />
-                        Generiert...
+                        Erstelle...
                       </>
-                    ) : currentPin !== null && remainingSeconds > 0 ? (
-                      'PIN bereits aktiv'
                     ) : (
-                      'PIN generieren'
+                      'Kopplungscode erstellen & kopieren'
                     )}
                   </button>
+                  <div className="text-xs text-gray-500 text-center">
+                    Der Code wird in die Zwischenablage kopiert
+                  </div>
                 </div>
               </div>
 
               {/* Enter PIN/Code Section */}
               <div>
                 <h3 className="text-sm font-medium text-gray-900 mb-3">
-                  Option 2: PIN/Code eingeben
+                  Option 2: Kopplungscode eingeben
                 </h3>
                 <div className="space-y-3">
-                  <input
-                    type="text"
+                  <textarea
                     value={pairingCode}
                     onChange={(e) => setPairingCode(e.target.value)}
-                    placeholder="6-stellige PIN oder Kopplungscode eingeben..."
-                    className="input-field"
+                    placeholder="Kopplungscode hier einfügen..."
+                    className="input-field resize-none h-20 text-sm"
+                    rows={3}
                   />
                   <button
                     onClick={handlePairDevice}
@@ -508,6 +520,41 @@ export const SyncManager: React.FC = () => {
                   </button>
                 </div>
               </div>
+            </div>
+
+            {/* Legacy PIN Section - Optional */}
+            <div className="border-t border-gray-200 pt-4 mt-4">
+              <details className="cursor-pointer">
+                <summary className="text-sm font-medium text-gray-700 mb-3">
+                  Alternative: PIN-System (veraltet)
+                </summary>
+                <div className="space-y-4 mt-3">
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3">
+                    <p className="text-xs text-yellow-700">
+                      ⚠️ Das PIN-System hat bekannte Probleme. Verwenden Sie stattdessen die Kopplungscodes oben.
+                    </p>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <button
+                      onClick={handleGeneratePin}
+                      disabled={loading || (currentPin !== null && remainingSeconds > 0)}
+                      className="btn-secondary w-full text-sm"
+                    >
+                      {currentPin !== null && remainingSeconds > 0 ? 'PIN bereits aktiv' : 'PIN generieren'}
+                    </button>
+                    
+                    {currentPin && remainingSeconds > 0 && (
+                      <button
+                        onClick={handleClearPin}
+                        className="btn-danger w-full text-sm"
+                      >
+                        PIN löschen
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </details>
             </div>
           </div>
         )}

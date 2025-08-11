@@ -109,6 +109,7 @@ interface AppState {
   generatePairingPin: () => Promise<ActivePin>;
   getCurrentPairingPin: () => Promise<void>;
   clearPairingPin: () => Promise<void>;
+  getPairingCode: () => Promise<string>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -492,6 +493,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       set({ 
         error: `Failed to clear pairing PIN: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  getPairingCode: async (): Promise<string> => {
+    set({ loading: true, error: null });
+    try {
+      const pairingCode = await invoke('get_pairing_code') as string;
+      set({ loading: false, error: null });
+      return pairingCode;
+    } catch (err) {
+      set({ 
+        error: `Failed to get pairing code: ${err}`,
         loading: false 
       });
       throw err;
