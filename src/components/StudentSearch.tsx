@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Download, Filter, Calendar } from 'lucide-react';
+import { Search, Download, Filter, Calendar, Trash2, AlertTriangle } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
 import { format } from 'date-fns';
 import { de } from 'date-fns/locale';
@@ -10,13 +10,21 @@ export const StudentSearch: React.FC = () => {
     observations, 
     searchObservations, 
     exportStudentData,
-    loading 
+    deleteObservation,
+    loading,
+    error,
+    setError
   } = useAppStore();
   
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStudent, setSelectedStudent] = useState<number | null>(null);
   const [selectedCategory, setSelectedCategory] = useState('');
   const [showFilters, setShowFilters] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    observationId: number;
+    studentName: string;
+    show: boolean;
+  } | null>(null);
 
   const CATEGORIES = ['Sozial', 'Fachlich', 'Verhalten', 'Förderung', 'Sonstiges'];
 
@@ -48,6 +56,32 @@ export const StudentSearch: React.FC = () => {
     } catch (error) {
       console.error('Export failed:', error);
     }
+  };
+
+  const handleDeleteClick = (observationId: number, studentName: string) => {
+    setDeleteConfirm({
+      observationId,
+      studentName,
+      show: true
+    });
+  };
+
+  const handleDeleteConfirm = async (forceDelete: boolean = false) => {
+    if (!deleteConfirm) return;
+
+    try {
+      await deleteObservation(deleteConfirm.observationId, forceDelete);
+      setDeleteConfirm(null);
+      setError(null);
+    } catch (error) {
+      console.error('Delete failed:', error);
+      // Keep the dialog open so user can see the error and try force delete if needed
+    }
+  };
+
+  const handleDeleteCancel = () => {
+    setDeleteConfirm(null);
+    setError(null);
   };
 
   // Filtered students for potential future use
@@ -208,6 +242,18 @@ export const StudentSearch: React.FC = () => {
                         </div>
                       </div>
                     )}
+                    
+                    {/* Delete Button */}
+                    <button
+                      onClick={() => handleDeleteClick(
+                        observation.id, 
+                        student ? `${student.first_name} ${student.last_name}` : 'Unbekannter Schüler'
+                      )}
+                      className="btn-secondary text-red-600 hover:bg-red-50 hover:text-red-700"
+                      title="Beobachtung löschen"
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -225,6 +271,81 @@ export const StudentSearch: React.FC = () => {
               </p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      {deleteConfirm?.show && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* Backdrop */}
+          <div className="absolute inset-0 bg-black bg-opacity-50"></div>
+          
+          {/* Dialog */}
+          <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+            <div className="flex items-center mb-4">
+              <div className="flex-shrink-0">
+                <AlertTriangle className="h-6 w-6 text-red-600" aria-hidden="true" />
+              </div>
+              <div className="ml-3">
+                <h3 className="text-lg font-medium text-gray-900">
+                  Beobachtung löschen
+                </h3>
+              </div>
+            </div>
+            
+            <div className="mb-6">
+              <p className="text-sm text-gray-700">
+                Möchten Sie die Beobachtung für <strong>{deleteConfirm.studentName}</strong> wirklich löschen?
+              </p>
+              <p className="text-sm text-red-600 mt-2 font-medium">
+                Diese Aktion kann nicht rückgängig gemacht werden.
+              </p>
+              
+              {error && (
+                <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-md">
+                  <div className="flex">
+                    <AlertTriangle className="h-4 w-4 text-red-600 mt-0.5 mr-2 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm text-red-800">{error}</p>
+                      <p className="text-sm text-red-700 mt-1">
+                        Möchten Sie die Löschung erzwingen? (Administrator-Berechtigung erforderlich)
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            <div className="flex justify-end space-x-3">
+              <button
+                type="button"
+                onClick={handleDeleteCancel}
+                className="btn-secondary"
+              >
+                Abbrechen
+              </button>
+              
+              {error ? (
+                <button
+                  type="button"
+                  onClick={() => handleDeleteConfirm(true)}
+                  disabled={loading}
+                  className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50"
+                >
+                  {loading ? 'Lösche...' : 'Erzwingen'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleDeleteConfirm(false)}
+                  disabled={loading}
+                  className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50"
+                >
+                  {loading ? 'Lösche...' : 'Löschen'}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>
