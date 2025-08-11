@@ -11,6 +11,7 @@ use tauri::Manager;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use base64::Engine;
+use p2p::ActivePin;
 
 // Data structures
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -214,6 +215,54 @@ async fn pair_device(
 }
 
 #[tauri::command]
+async fn generate_pairing_pin(
+    state: tauri::State<'_, AppState>,
+) -> Result<ActivePin, String> {
+    let p2p_guard = state.p2p.lock().await;
+    if let Some(p2p) = p2p_guard.as_ref() {
+        let active_pin = p2p.generate_pin().await.map_err(|e| e.to_string())?;
+        
+        // Log the PIN generation
+        state.audit.log_action("generate", "pairing_pin", 0, 1, Some(&active_pin.pin)).await
+            .map_err(|e| e.to_string())?;
+        
+        Ok(active_pin)
+    } else {
+        Err("P2P not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+async fn get_current_pairing_pin(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<ActivePin>, String> {
+    let p2p_guard = state.p2p.lock().await;
+    if let Some(p2p) = p2p_guard.as_ref() {
+        Ok(p2p.get_current_pin().await)
+    } else {
+        Err("P2P not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+async fn clear_pairing_pin(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let p2p_guard = state.p2p.lock().await;
+    if let Some(p2p) = p2p_guard.as_ref() {
+        p2p.clear_pin().await;
+        
+        // Log the PIN clearing
+        state.audit.log_action("clear", "pairing_pin", 0, 1, None).await
+            .map_err(|e| e.to_string())?;
+        
+        Ok(())
+    } else {
+        Err("P2P not initialized".to_string())
+    }
+}
+
+#[tauri::command]
 async fn trigger_sync(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut p2p_guard = state.p2p.lock().await;
     if let Some(p2p) = p2p_guard.as_mut() {
@@ -343,6 +392,9 @@ fn main() {
             start_p2p_sync,
             stop_p2p_sync,
             pair_device,
+            generate_pairing_pin,
+            get_current_pairing_pin,
+            clear_pairing_pin,
             trigger_sync,
             export_changeset,
             import_changeset,

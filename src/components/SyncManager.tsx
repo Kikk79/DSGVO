@@ -26,19 +26,50 @@ export const SyncManager: React.FC = () => {
     importChangeset,
     loading,
     error,
-    deviceConfig
+    deviceConfig,
+    currentPin,
+    generatePairingPin,
+    getCurrentPairingPin,
+    clearPairingPin
   } = useAppStore();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showPairing, setShowPairing] = useState(false);
   const [pairingCode, setPairingCode] = useState('');
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [remainingSeconds, setRemainingSeconds] = useState<number>(0);
 
   useEffect(() => {
     getSyncStatus();
+    getCurrentPairingPin();
     // Refresh sync status every 30 seconds
-    const interval = setInterval(getSyncStatus, 30000);
+    const interval = setInterval(() => {
+      getSyncStatus();
+      getCurrentPairingPin();
+    }, 30000);
     return () => clearInterval(interval);
-  }, [getSyncStatus]);
+  }, [getSyncStatus, getCurrentPairingPin]);
+
+  // PIN countdown timer effect
+  useEffect(() => {
+    if (currentPin && currentPin.expires_in_seconds > 0) {
+      setRemainingSeconds(currentPin.expires_in_seconds);
+      
+      const interval = setInterval(() => {
+        setRemainingSeconds((prev) => {
+          if (prev <= 1) {
+            clearInterval(interval);
+            getCurrentPairingPin(); // Refresh to check if PIN is still valid
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+      
+      return () => clearInterval(interval);
+    } else {
+      setRemainingSeconds(0);
+    }
+  }, [currentPin, getCurrentPairingPin]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -107,6 +138,30 @@ export const SyncManager: React.FC = () => {
       }
     };
     input.click();
+  };
+
+  const handleGeneratePin = async () => {
+    try {
+      await generatePairingPin();
+      showNotification('success', 'PIN erfolgreich generiert!');
+    } catch (error) {
+      showNotification('error', `PIN-Generierung fehlgeschlagen: ${error}`);
+    }
+  };
+
+  const handleClearPin = async () => {
+    try {
+      await clearPairingPin();
+      showNotification('success', 'PIN erfolgreich gelöscht!');
+    } catch (error) {
+      showNotification('error', `PIN-Löschung fehlgeschlagen: ${error}`);
+    }
+  };
+
+  const formatTime = (seconds: number): string => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
 
   const getConnectionStatus = () => {
@@ -351,7 +406,7 @@ export const SyncManager: React.FC = () => {
         </div>
 
         {showPairing && (
-          <div className="space-y-4">
+          <div className="space-y-6">
             <div className="bg-yellow-50 border border-yellow-200 rounded-md p-4">
               <div className="flex">
                 <AlertCircle className="h-5 w-5 text-yellow-400 mt-0.5 mr-3" aria-hidden="true" />
@@ -367,43 +422,90 @@ export const SyncManager: React.FC = () => {
               </div>
             </div>
 
+            {/* PIN Display Section */}
+            {currentPin !== null && remainingSeconds > 0 && (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+                <div className="text-center">
+                  <h3 className="text-lg font-semibold text-blue-900 mb-2">
+                    Ihr Kopplungs-PIN
+                  </h3>
+                  <div className="text-4xl font-mono font-bold text-blue-600 mb-2">
+                    {currentPin.pin}
+                  </div>
+                  <p className="text-sm text-blue-700 mb-2">
+                    Geben Sie diese PIN auf dem anderen Gerät ein
+                  </p>
+                  <div className="flex items-center justify-center space-x-2">
+                    <div className="text-sm text-blue-600">
+                      Läuft ab in: <span className="font-mono font-semibold">{formatTime(remainingSeconds)}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleClearPin}
+                    className="mt-3 text-sm text-blue-600 hover:text-blue-800 underline"
+                  >
+                    PIN löschen
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Generate PIN Section */}
               <div>
-                <h3 className="text-sm font-medium text-gray-900 mb-2">
-                  1. Kopplungscode vom {peerDevice.name} eingeben
+                <h3 className="text-sm font-medium text-gray-900 mb-3">
+                  Option 1: PIN generieren
                 </h3>
-                <input
-                  type="text"
-                  value={pairingCode}
-                  onChange={(e) => setPairingCode(e.target.value)}
-                  placeholder="Kopplungscode eingeben..."
-                  className="input-field"
-                />
-                <button
-                  onClick={handlePairDevice}
-                  disabled={!pairingCode.trim() || loading}
-                  className="btn-primary mt-2 w-full flex items-center justify-center"
-                >
-                  {loading ? (
-                    <>
-                      <div className="animate-spin h-4 w-4 mr-2 border-2 border-white border-t-transparent rounded-full" />
-                      Koppelt...
-                    </>
-                  ) : (
-                    'Gerät koppeln'
-                  )}
-                </button>
+                <div className="space-y-3">
+                  <p className="text-sm text-gray-600">
+                    Generieren Sie eine 6-stellige PIN für die einfache Gerätekopplung.
+                  </p>
+                  <button
+                    onClick={handleGeneratePin}
+                    disabled={loading || (currentPin !== null && remainingSeconds > 0)}
+                    className="btn-primary w-full flex items-center justify-center"
+                  >
+                    {loading ? (
+                      <>
+                        <div className="animate-spin h-4 w-4 mr-2 border-2 border-white border-t-transparent rounded-full" />
+                        Generiert...
+                      </>
+                    ) : currentPin !== null && remainingSeconds > 0 ? (
+                      'PIN bereits aktiv'
+                    ) : (
+                      'PIN generieren'
+                    )}
+                  </button>
+                </div>
               </div>
 
+              {/* Enter PIN/Code Section */}
               <div>
-                <h3 className="text-sm font-medium text-gray-900 mb-2">
-                  2. Oder QR-Code scannen
+                <h3 className="text-sm font-medium text-gray-900 mb-3">
+                  Option 2: PIN/Code eingeben
                 </h3>
-                <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
-                  <QrCode className="mx-auto h-12 w-12 text-gray-400" />
-                  <p className="mt-2 text-sm text-gray-500">
-                    QR-Code vom {peerDevice.name} hier scannen
-                  </p>
+                <div className="space-y-3">
+                  <input
+                    type="text"
+                    value={pairingCode}
+                    onChange={(e) => setPairingCode(e.target.value)}
+                    placeholder="6-stellige PIN oder Kopplungscode eingeben..."
+                    className="input-field"
+                  />
+                  <button
+                    onClick={handlePairDevice}
+                    disabled={!pairingCode.trim() || loading}
+                    className="btn-primary w-full flex items-center justify-center"
+                  >
+                    {loading ? (
+                      <>
+                        <div className="animate-spin h-4 w-4 mr-2 border-2 border-white border-t-transparent rounded-full" />
+                        Koppelt...
+                      </>
+                    ) : (
+                      'Gerät koppeln'
+                    )}
+                  </button>
                 </div>
               </div>
             </div>

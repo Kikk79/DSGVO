@@ -38,6 +38,12 @@ export interface DeviceConfig {
   device_name?: string;
 }
 
+export interface ActivePin {
+  pin: string;
+  expires_at: string;
+  expires_in_seconds: number;
+}
+
 interface AppState {
   // Data
   students: Student[];
@@ -49,6 +55,7 @@ interface AppState {
   error: string | null;
   syncStatus: SyncStatus | null;
   deviceConfig: DeviceConfig | null;
+  currentPin: ActivePin | null;
   
   // Actions
   initializeApp: () => Promise<void>;
@@ -89,6 +96,11 @@ interface AppState {
   getDeviceConfig: () => Promise<void>;
   // eslint-disable-next-line no-unused-vars
   setDeviceConfig: (device_type: 'computer' | 'notebook', device_name?: string) => Promise<void>;
+  
+  // PIN Management
+  generatePairingPin: () => Promise<ActivePin>;
+  getCurrentPairingPin: () => Promise<void>;
+  clearPairingPin: () => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -100,6 +112,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   error: null,
   syncStatus: null,
   deviceConfig: null,
+  currentPin: null,
 
   // Actions
   initializeApp: async () => {
@@ -370,6 +383,47 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       set({ 
         error: `Failed to set device config: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  // PIN Management implementations
+  generatePairingPin: async (): Promise<ActivePin> => {
+    set({ loading: true, error: null });
+    
+    try {
+      const activePin = await invoke('generate_pairing_pin') as ActivePin;
+      set({ currentPin: activePin, loading: false, error: null });
+      return activePin;
+    } catch (err) {
+      set({ 
+        error: `Failed to generate pairing PIN: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  getCurrentPairingPin: async () => {
+    try {
+      const currentPin = await invoke('get_current_pairing_pin') as ActivePin | null;
+      set({ currentPin, error: null });
+    } catch (error) {
+      set({ error: `Failed to get current PIN: ${error}` });
+    }
+  },
+
+  clearPairingPin: async () => {
+    set({ loading: true, error: null });
+    
+    try {
+      await invoke('clear_pairing_pin');
+      set({ currentPin: null, loading: false, error: null });
+    } catch (err) {
+      set({ 
+        error: `Failed to clear pairing PIN: ${err}`,
         loading: false 
       });
       throw err;

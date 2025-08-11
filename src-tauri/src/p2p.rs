@@ -4,11 +4,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls::{ClientConfig, ServerConfig}};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, Duration};
 use crate::{crypto::CryptoManager, database::Database, SyncStatus};
 use base64::Engine;
 use std::io::Cursor;
 use tokio::sync::Mutex;
+use rand::Rng;
 
 pub struct P2PManager {
     crypto: Arc<CryptoManager>,
@@ -17,6 +18,7 @@ pub struct P2PManager {
     peers: HashMap<String, PeerInfo>,
     mdns_daemon: Option<ServiceDaemon>,
     server_handle: Option<tokio::task::JoinHandle<()>>,
+    pin_storage: Arc<Mutex<HashMap<String, PinData>>>,
 }
 
 #[derive(Clone)]
@@ -25,6 +27,20 @@ struct PeerInfo {
     address: std::net::SocketAddr,
     last_seen: DateTime<Utc>,
     certificate: String,
+}
+
+#[derive(Clone)]
+pub struct PinData {
+    pub pairing_code: String,
+    pub device_id: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActivePin {
+    pub pin: String,
+    pub expires_at: DateTime<Utc>,
+    pub expires_in_seconds: i64,
 }
 
 impl P2PManager {
@@ -38,7 +54,85 @@ impl P2PManager {
             peers: HashMap::new(),
             mdns_daemon: None,
             server_handle: None,
+            pin_storage: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Generate a 6-digit PIN for device pairing
+    pub async fn generate_pin(&self) -> Result<ActivePin> {
+        // Clean up expired PINs first
+        self.cleanup_expired_pins().await;
+        
+        // Generate a 6-digit PIN
+        let pin = format!("{:06}", rand::thread_rng().gen_range(100000..1000000));
+        
+        // Generate the full pairing code that will be used internally
+        let pairing_code = self.generate_pairing_code()?;
+        
+        // Set expiration time (10 minutes from now)
+        let expires_at = Utc::now() + Duration::minutes(10);
+        let expires_in_seconds = (expires_at - Utc::now()).num_seconds();
+        
+        // Store the PIN mapping
+        let pin_data = PinData {
+            pairing_code,
+            device_id: self.device_id.clone(),
+            expires_at,
+        };
+        
+        let mut pin_storage = self.pin_storage.lock().await;
+        pin_storage.insert(pin.clone(), pin_data);
+        
+        tracing::info!("Generated PIN {} for device pairing (expires at {})", pin, expires_at);
+        
+        Ok(ActivePin {
+            pin,
+            expires_at,
+            expires_in_seconds,
+        })
+    }
+    
+    /// Get the current active PIN if it exists and hasn't expired
+    pub async fn get_current_pin(&self) -> Option<ActivePin> {
+        let pin_storage = self.pin_storage.lock().await;
+        let now = Utc::now();
+        
+        // Find the first non-expired PIN
+        for (pin, pin_data) in pin_storage.iter() {
+            if pin_data.expires_at > now {
+                let expires_in_seconds = (pin_data.expires_at - now).num_seconds();
+                return Some(ActivePin {
+                    pin: pin.clone(),
+                    expires_at: pin_data.expires_at,
+                    expires_in_seconds,
+                });
+            }
+        }
+        
+        None
+    }
+    
+    /// Clear the current PIN manually
+    pub async fn clear_pin(&self) {
+        let mut pin_storage = self.pin_storage.lock().await;
+        pin_storage.clear();
+        tracing::info!("Cleared all pairing PINs");
+    }
+    
+    /// Clean up expired PINs from storage
+    async fn cleanup_expired_pins(&self) {
+        let mut pin_storage = self.pin_storage.lock().await;
+        let now = Utc::now();
+        
+        let expired_pins: Vec<String> = pin_storage.iter()
+            .filter(|(_, pin_data)| pin_data.expires_at <= now)
+            .map(|(pin, _)| pin.clone())
+            .collect();
+            
+        for pin in expired_pins {
+            pin_storage.remove(&pin);
+            tracing::info!("Removed expired PIN: {}", pin);
+        }
     }
 
     pub async fn start_discovery_with_port(&mut self, port: u16) -> Result<()> {
@@ -213,9 +307,27 @@ impl P2PManager {
         Ok(pairing_code)
     }
 
-    pub fn process_pairing_code(&mut self, pairing_code: &str, peer_address: String) -> Result<String> {
+    pub async fn process_pairing_code(&mut self, pairing_code: &str, peer_address: String) -> Result<String> {
+        let actual_pairing_code = if pairing_code.len() == 6 && pairing_code.chars().all(|c| c.is_ascii_digit()) {
+            // This looks like a 6-digit PIN - look it up in our PIN storage
+            let pin_storage = self.pin_storage.lock().await;
+            let pin_data = pin_storage.get(pairing_code)
+                .context("Invalid PIN or PIN has expired")?;
+                
+            // Check if the PIN has expired
+            if pin_data.expires_at <= Utc::now() {
+                return Err(anyhow::anyhow!("PIN has expired"));
+            }
+            
+            tracing::info!("Using PIN {} for pairing", pairing_code);
+            pin_data.pairing_code.clone()
+        } else {
+            // This should be a full base64-encoded pairing code
+            pairing_code.to_string()
+        };
+        
         let pairing_data: serde_json::Value = serde_json::from_str(
-            &String::from_utf8(base64::prelude::BASE64_STANDARD.decode(pairing_code)?)?
+            &String::from_utf8(base64::prelude::BASE64_STANDARD.decode(&actual_pairing_code)?)?
         )?;
         
         let peer_id = pairing_data["device_id"].as_str()
@@ -227,6 +339,13 @@ impl P2PManager {
             .to_string();
         
         self.add_peer_manually(peer_id.clone(), peer_address, peer_cert)?;
+        
+        // If we used a PIN, remove it from storage (single use)
+        if pairing_code.len() == 6 && pairing_code.chars().all(|c| c.is_ascii_digit()) {
+            let mut pin_storage = self.pin_storage.lock().await;
+            pin_storage.remove(pairing_code);
+            tracing::info!("Removed used PIN {} from storage", pairing_code);
+        }
         
         Ok(peer_id)
     }
@@ -248,7 +367,7 @@ impl P2PManager {
     pub async fn pair_with_device(&mut self, pairing_code: &str) -> Result<()> {
         // In a real implementation, this would parse the pairing code
         // and establish a connection with the peer device
-        let peer_id = self.process_pairing_code(pairing_code, "127.0.0.1:8081".to_string())?;
+        let peer_id = self.process_pairing_code(pairing_code, "127.0.0.1:8081".to_string()).await?;
         tracing::info!("Successfully paired with device: {}", peer_id);
         Ok(())
     }
