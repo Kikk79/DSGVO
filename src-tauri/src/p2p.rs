@@ -15,7 +15,7 @@ pub struct P2PManager {
     crypto: Arc<CryptoManager>,
     db: Arc<Mutex<Database>>,
     device_id: String,
-    peers: HashMap<String, PeerInfo>,
+    peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
     mdns_daemon: Option<ServiceDaemon>,
     server_handle: Option<tokio::task::JoinHandle<()>>,
     pin_storage: Arc<Mutex<HashMap<String, PinData>>>,
@@ -51,7 +51,7 @@ impl P2PManager {
             crypto,
             db,
             device_id,
-            peers: HashMap::new(),
+            peers: Arc::new(Mutex::new(HashMap::new())),
             mdns_daemon: None,
             server_handle: None,
             pin_storage: Arc::new(Mutex::new(HashMap::new())),
@@ -155,8 +155,8 @@ impl P2PManager {
             .context("Failed to start service browsing")?;
         
         // Spawn task to handle discovered services
-        let crypto_clone = self.crypto.clone();
         let device_id_clone = self.device_id.clone();
+        let peers_clone = self.peers.clone();
         tokio::spawn(async move {
             while let Ok(event) = receiver.recv_async().await {
                 match event {
@@ -166,8 +166,22 @@ impl P2PManager {
                         }
                         
                         tracing::info!("Discovered peer: {:?}", info);
-                        // Handle discovered peer
-                        // In a full implementation, this would add the peer to the peers list
+                        
+                        let peer_id_from_service = info.get_fullname().split('.').next().unwrap_or("").to_string();
+
+                        if !peer_id_from_service.is_empty() {
+                            if let Some(address) = info.get_addresses().iter().next() {
+                                let peer_info = PeerInfo {
+                                    id: peer_id_from_service.clone(),
+                                    address: *address,
+                                    last_seen: Utc::now(),
+                                    certificate: "".to_string(), // Certificate will be exchanged during pairing
+                                };
+
+                                let mut peers = peers_clone.lock().await;
+                                peers.insert(peer_id_from_service, peer_info);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -365,11 +379,17 @@ impl P2PManager {
     }
     
     pub async fn pair_with_device(&mut self, pairing_code: &str) -> Result<()> {
-        // In a real implementation, this would parse the pairing code
-        // and establish a connection with the peer device
-        let peer_id = self.process_pairing_code(pairing_code, "127.0.0.1:8081".to_string()).await?;
-        tracing::info!("Successfully paired with device: {}", peer_id);
-        Ok(())
+        let peers = self.peers.lock().await;
+        if let Some(peer_info) = peers.values().next() {
+            let peer_address = peer_info.address.to_string();
+            drop(peers);
+
+            let peer_id = self.process_pairing_code(pairing_code, peer_address).await?;
+            tracing::info!("Successfully paired with device: {}", peer_id);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("No peer discovered to pair with. Make sure the other device is on the same network and has generated a PIN."))
+        }
     }
     
     pub async fn sync_with_peers(&mut self) -> Result<()> {

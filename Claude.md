@@ -25,10 +25,15 @@ To fully understand this project and continue development, another Claude
   🎯 Core Understanding (Read First)
 
   1. README.md - Complete project overview, architecture, features, and roadmap
-  2. ~~.warp.md - Project changes made by other agents than claude caude~~
+  2. --------------------------------------
   3. package.json - Dependencies, scripts, and project metadata
   4. src-tauri/Cargo.toml - Rust dependencies and build configuration
 
+
+
+
+
+########## ONLY READ THESE FILES IF YOU NEED TO UNDERSTAND THE ARCHITECTURE TO SAVE TOKENS ##########
   🏗️ Architecture & Implementation
 
   5. src-tauri/src/main.rs - Main application entry point and Tauri commands
