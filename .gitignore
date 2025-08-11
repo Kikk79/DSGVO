@@ -25,3 +25,8 @@ Thumbs.db
 # Env
 .env
 .env.*
+Chat.*
+CLAUDE.*
+Claude.*
+.warp.*
+chatlog.*
