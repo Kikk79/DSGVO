@@ -1,3 +1,4 @@
+# .gitignore
 # Rust
 /target/
 **/*.rs.bk
@@ -25,3 +26,8 @@ Thumbs.db
 # Env
 .env
 .env.*
+Chat.*
+CLAUDE.*
+Claude.*
+.warp.*
+chatlog.*
