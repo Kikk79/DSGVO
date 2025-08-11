@@ -308,27 +308,10 @@ impl P2PManager {
     }
 
     pub async fn process_pairing_code(&mut self, pairing_code: &str, peer_address: String) -> Result<String> {
-        let actual_pairing_code = if pairing_code.len() == 6 && pairing_code.chars().all(|c| c.is_ascii_digit()) {
-            // This looks like a 6-digit PIN - look it up in our PIN storage
-            let pin_storage = self.pin_storage.lock().await;
-            let pin_data = pin_storage.get(pairing_code)
-                .context("Invalid PIN or PIN has expired")?;
-                
-            // Check if the PIN has expired
-            if pin_data.expires_at <= Utc::now() {
-                return Err(anyhow::anyhow!("PIN has expired"));
-            }
-            
-            tracing::info!("Using PIN {} for pairing", pairing_code);
-            pin_data.pairing_code.clone()
-        } else {
-            // This should be a full base64-encoded pairing code
-            pairing_code.to_string()
-        };
-        
+        // Always treat input as the full pairing code - no PIN lookup
         let pairing_data: serde_json::Value = serde_json::from_str(
-            &String::from_utf8(base64::prelude::BASE64_STANDARD.decode(&actual_pairing_code)?)?
-        )?;
+            &String::from_utf8(base64::prelude::BASE64_STANDARD.decode(pairing_code)?)?
+        ).context("Invalid pairing code format")?;
         
         let peer_id = pairing_data["device_id"].as_str()
             .context("Invalid pairing code: missing device_id")?
@@ -340,12 +323,7 @@ impl P2PManager {
         
         self.add_peer_manually(peer_id.clone(), peer_address, peer_cert)?;
         
-        // If we used a PIN, remove it from storage (single use)
-        if pairing_code.len() == 6 && pairing_code.chars().all(|c| c.is_ascii_digit()) {
-            let mut pin_storage = self.pin_storage.lock().await;
-            pin_storage.remove(pairing_code);
-            tracing::info!("Removed used PIN {} from storage", pairing_code);
-        }
+        tracing::info!("Successfully paired with device: {}", peer_id);
         
         Ok(peer_id)
     }

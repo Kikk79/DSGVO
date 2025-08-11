@@ -233,6 +233,24 @@ async fn generate_pairing_pin(
 }
 
 #[tauri::command]
+async fn get_pairing_code(
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let p2p_guard = state.p2p.lock().await;
+    if let Some(p2p) = p2p_guard.as_ref() {
+        let pairing_code = p2p.generate_pairing_code().map_err(|e| e.to_string())?;
+        
+        // Log the pairing code generation
+        state.audit.log_action("generate", "pairing_code", 0, 1, None).await
+            .map_err(|e| e.to_string())?;
+        
+        Ok(pairing_code)
+    } else {
+        Err("P2P not initialized".to_string())
+    }
+}
+
+#[tauri::command]
 async fn get_current_pairing_pin(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<ActivePin>, String> {
@@ -435,6 +453,7 @@ fn main() {
             stop_p2p_sync,
             pair_device,
             generate_pairing_pin,
+            get_pairing_code,
             get_current_pairing_pin,
             clear_pairing_pin,
             trigger_sync,
