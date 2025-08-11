@@ -378,6 +378,39 @@ async fn delete_class(
     Ok(())
 }
 
+#[tauri::command]
+async fn delete_observation(
+    state: tauri::State<'_, AppState>,
+    observation_id: i64,
+    force_delete: Option<bool>,
+) -> Result<(), String> {
+    let force_delete = force_delete.unwrap_or(false);
+    let db = state.db.lock().await;
+    
+    // In a real system, you would get the current user ID from session/auth
+    // For now, using author_id = 1 as default
+    let author_id = 1;
+    
+    // Log the deletion attempt
+    let delete_type = if force_delete { "force_delete" } else { "author_delete" };
+    state.audit.log_action("delete", "observation", observation_id, author_id, Some(delete_type)).await
+        .map_err(|e| e.to_string())?;
+    
+    db.delete_observation(observation_id, author_id, force_delete).await
+        .map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_observation(
+    state: tauri::State<'_, AppState>,
+    observation_id: i64,
+) -> Result<Option<Observation>, String> {
+    let db = state.db.lock().await;
+    db.get_observation(observation_id).await.map_err(|e| e.to_string())
+}
+
 fn main() {
     // A simple logger that prints to the console
     env_logger::init();
@@ -423,6 +456,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_sync_status,
             create_observation,
+            get_observation,
+            delete_observation,
             get_students,
             get_classes,
             search_observations,

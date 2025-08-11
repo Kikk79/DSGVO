@@ -82,6 +82,10 @@ interface AppState {
   // eslint-disable-next-line no-unused-vars
   deleteClass: (class_id: number, force_delete?: boolean) => Promise<void>;
   // eslint-disable-next-line no-unused-vars
+  deleteObservation: (observation_id: number, force_delete?: boolean) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  getObservation: (observation_id: number) => Promise<Observation | null>;
+  // eslint-disable-next-line no-unused-vars
   setError: (error: string | null) => void;
   // eslint-disable-next-line no-unused-vars
   setLoading: (loading: boolean) => void;
@@ -285,6 +289,35 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ loading: false });
     } catch (err) {
       set({ error: `Failed to delete class: ${err}`, loading: false });
+      throw err;
+    }
+  },
+
+  // Delete an observation
+  deleteObservation: async (observation_id: number, force_delete: boolean = false) => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('delete_observation', { observationId: observation_id, forceDelete: force_delete });
+      
+      // Remove the observation from local state immediately for better UX
+      const { observations } = get();
+      const updatedObservations = observations.filter(obs => obs.id !== observation_id);
+      set({ observations: updatedObservations, loading: false, error: null });
+    } catch (err) {
+      set({ error: `Failed to delete observation: ${err}`, loading: false });
+      throw err;
+    }
+  },
+
+  // Get a single observation
+  getObservation: async (observation_id: number): Promise<Observation | null> => {
+    set({ loading: true, error: null });
+    try {
+      const observation = await invoke('get_observation', { observationId: observation_id }) as Observation | null;
+      set({ loading: false, error: null });
+      return observation;
+    } catch (err) {
+      set({ error: `Failed to get observation: ${err}`, loading: false });
       throw err;
     }
   },

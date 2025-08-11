@@ -396,6 +396,97 @@ impl Database {
         Ok(())
     }
 
+    pub async fn delete_observation(&self, observation_id: i64, author_id: i64, force_delete: bool) -> Result<()> {
+        // First verify the observation exists and get its details
+        let observation = sqlx::query(
+            "SELECT id, student_id, author_id FROM observations WHERE id = ?"
+        )
+        .bind(observation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let observation_row = match observation {
+            Some(row) => row,
+            None => return Err(anyhow::anyhow!("Observation with ID {} not found", observation_id)),
+        };
+
+        let stored_author_id: i64 = observation_row.get("author_id");
+        let _student_id: i64 = observation_row.get("student_id");
+
+        // Security check: Only allow author or system admin to delete
+        // In a real system, you'd have proper role-based access control
+        if stored_author_id != author_id && !force_delete {
+            return Err(anyhow::anyhow!(
+                "Access denied: Only the author can delete this observation. Use force_delete for administrative override."
+            ));
+        }
+
+        // Check if there are attachments
+        let attachment_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM attachments WHERE observation_id = ?"
+        )
+        .bind(observation_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // Delete attachments first (GDPR compliance - cascading deletion)
+        if attachment_count > 0 {
+            sqlx::query("DELETE FROM attachments WHERE observation_id = ?")
+                .bind(observation_id)
+                .execute(&self.pool)
+                .await?;
+        }
+
+        // Delete the observation (hard delete for GDPR compliance)
+        let rows_affected = sqlx::query("DELETE FROM observations WHERE id = ?")
+            .bind(observation_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+
+        if rows_affected == 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to delete observation {}. It may have been already deleted.", 
+                observation_id
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_observation(&self, observation_id: i64) -> Result<Option<Observation>> {
+        let row = sqlx::query(
+            "SELECT id, student_id, author_id, category, text_encrypted, tags, created_at, updated_at, source_device_id FROM observations WHERE id = ?"
+        )
+        .bind(observation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(row) => {
+                let encrypted_text: Vec<u8> = row.get("text_encrypted");
+                let decrypted_text = self.crypto.decrypt(&encrypted_text)?;
+                let text = String::from_utf8(decrypted_text)?;
+                
+                let tags_json: String = row.get("tags");
+                let tags: Vec<String> = serde_json::from_str(&tags_json)?;
+
+                Ok(Some(Observation {
+                    id: row.get("id"),
+                    student_id: row.get("student_id"),
+                    author_id: row.get("author_id"),
+                    category: row.get("category"),
+                    text,
+                    tags,
+                    created_at: row.get("created_at"),
+                    updated_at: row.get("updated_at"),
+                    source_device_id: row.get("source_device_id"),
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub async fn get_pending_changesets(&self, peer_id: &str) -> Result<Vec<u8>> {
         // This would implement SQLite session/changeset functionality
         // For now, return empty changeset
