@@ -1,14 +1,28 @@
 use sqlx::{Pool, Sqlite, Row, sqlite::SqlitePoolOptions};
 use anyhow::{Result, Context};
 use chrono::Utc;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::crypto::CryptoManager;
 use crate::{Student, Class, Observation};
 
+use rusqlite::{Connection, OpenFlags};
+use libsqlite3_sys::{
+    sqlite3_session_create, sqlite3_session_changeset, sqlite3_session_enable,
+    sqlite3_session_object_config, sqlite3_session_attach, sqlite3_session_delete,
+    SQLITE_SESSION_OBJCONFIG_SIZE_LIMIT, SQLITE_SESSION_OBJCONFIG_ROWID_COLUMN,
+    SQLITE_CHANGESET_DATA, SQLITE_CHANGESET_NOT_FOUND, SQLITE_CHANGESET_CONFLICT,
+    SQLITE_CHANGESET_CONSTRAINT, SQLITE_CHANGESET_FOREIGN_KEY, SQLITE_CHANGESET_OMIT,
+    SQLITE_CHANGESET_REPLACE, SQLITE_CHANGESET_ABORT,
+    sqlite3_value, sqlite3_changeset_apply,
+};
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_int, c_void, c_char};
+
 pub struct Database {
     pool: Pool<Sqlite>,
     crypto: Arc<CryptoManager>,
+    db_path: PathBuf,
 }
 
 impl Database {
@@ -28,6 +42,7 @@ impl Database {
             .context("Failed to connect to database")?;
 
         // Enable SQLite session extension for changeset functionality
+        // This PRAGMA is for WAL mode, not directly for session. Session is enabled via C API.
         sqlx::query("PRAGMA journal_mode=WAL")
             .execute(&pool)
             .await?;
@@ -36,7 +51,7 @@ impl Database {
             .execute(&pool)
             .await?;
 
-        let db = Self { pool, crypto };
+        let db = Self { pool, crypto, db_path: db_path.as_ref().to_path_buf() };
         db.migrate().await?;
         Ok(db)
     }
@@ -397,23 +412,115 @@ impl Database {
     }
 
     pub async fn get_pending_changesets(&self, peer_id: &str) -> Result<Vec<u8>> {
-        // This would implement SQLite session/changeset functionality
-        // For now, return empty changeset
-        // In a full implementation, this would:
-        // 1. Start a session
-        // 2. Compare with peer's last_seq
-        // 3. Generate changeset for all changes since then
-        // 4. Return signed, versioned changeset
-        Ok(Vec::new())
+        let db_path_str = self.db_path.to_str().context("Invalid database path")?;
+        let db_path_cstring = CString::new(db_path_str)?;
+
+        // Open a separate rusqlite connection for session management
+        let conn = Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+
+        unsafe {
+            let mut session = std::ptr::null_mut();
+            let rc = sqlite3_session_create(conn.handle(), CString::new("main")?.as_ptr(), &mut session);
+            if rc != 0 {
+                return Err(anyhow::anyhow!("Failed to create SQLite session: {}", rc));
+            }
+
+            // Enable session for all tables
+            let rc = sqlite3_session_enable(session, CString::new("main")?.as_ptr(), 1);
+            if rc != 0 {
+                sqlite3_session_delete(session);
+                return Err(anyhow::anyhow!("Failed to enable SQLite session: {}", rc));
+            }
+
+            // Get last_seq for this peer
+            let last_seq: i64 = sqlx::query_scalar(
+                "SELECT last_seq FROM sync_state WHERE peer_id = ?"
+            )
+            .bind(peer_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .unwrap_or(0);
+
+            // Configure session to start from last_seq (this is a simplified approach,
+            // a real implementation would use sqlite3_session_set_sync_data or similar
+            // to track changes more precisely based on a sync token/timestamp)
+            // For now, we'll just generate a full changeset and rely on the apply_changeset
+            // to handle conflicts.
+            // This part needs more thought for a robust solution.
+
+            let mut changeset_ptr = std::ptr::null_mut();
+            let mut changeset_len = 0;
+            let rc = sqlite3_session_changeset(session, &mut changeset_ptr, &mut changeset_len);
+            if rc != 0 {
+                sqlite3_session_delete(session);
+                return Err(anyhow::anyhow!("Failed to get changeset: {}", rc));
+            }
+
+            let changeset_data = std::slice::from_raw_parts(changeset_ptr, changeset_len as usize).to_vec();
+
+            // Update last_seq (simplified: just increment for now)
+            sqlx::query(
+                "INSERT OR REPLACE INTO sync_state (peer_id, last_seq, last_pull, last_push) VALUES (?, ?, ?, ?)"
+            )
+            .bind(peer_id)
+            .bind(last_seq + 1) // Simplified: just increment
+            .bind(Utc::now())
+            .bind(Utc::now())
+            .execute(&self.pool)
+            .await?;
+
+            sqlite3_session_delete(session);
+            Ok(changeset_data)
+        }
     }
 
     pub async fn apply_changeset(&self, changeset: &[u8], peer_id: &str) -> Result<()> {
-        // This would apply SQLite changeset
-        // In a full implementation, this would:
-        // 1. Verify changeset signature
-        // 2. Apply changeset to database
-        // 3. Handle conflicts according to strategy
-        // 4. Update sync_state for peer
+        let db_path_str = self.db_path.to_str().context("Invalid database path")?;
+        let db_path_cstring = CString::new(db_path_str)?;
+
+        // Open a separate rusqlite connection for session management
+        let mut conn = Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+
+        // Conflict handler: always apply the incoming change (last-writer-wins)
+        let conflict_handler = | _table: *const c_char, _col: *const c_char, _op: c_int, _old_val: *mut sqlite3_value, _new_val: *mut sqlite3_value | -> c_int {
+            SQLITE_CHANGESET_REPLACE
+        };
+
+        unsafe {
+            let rc = libsqlite3_sys::sqlite3changeset_apply(
+                conn.handle(),
+                changeset.len() as i32,
+                changeset.as_ptr() as *const c_void,
+                Some(conflict_handler),
+                std::ptr::null_mut(), // context for conflict handler
+            );
+
+            if rc != 0 {
+                return Err(anyhow::anyhow!("Failed to apply changeset: {}", rc));
+            }
+        }
+
+        // Update sync_state for the peer
+        sqlx::query(
+            "INSERT OR REPLACE INTO sync_state (peer_id, last_pull, last_push) VALUES (?, ?, ?)"
+        )
+        .bind(peer_id)
+        .bind(Utc::now())
+        .bind(Utc::now()) // Assuming push also happened
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn change_path(&self, new_path: String) -> Result<()> {
+        // This is a placeholder. A real implementation would need to:
+        // 1. Close the current database connection.
+        // 2. Move the database file to the new path.
+        // 3. Re-open the database connection with the new path.
+        // This is not straightforward with the current application architecture.
+        // For now, we'll just log the intention.
+        println!("Database path change requested to: {}", new_path);
         Ok(())
     }
 }

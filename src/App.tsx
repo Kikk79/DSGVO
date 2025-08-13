@@ -7,6 +7,9 @@ import { StudentSearch } from './components/StudentSearch';
 import { AddStudent } from './components/AddStudent';
 import { SyncManager } from './components/SyncManager';
 import { SettingsPage } from './components/SettingsPage';
+import { PrivacyPolicy } from './components/PrivacyPolicy';
+import { DataCorrection } from './components/DataCorrection';
+import { DataPortability } from './components/DataPortability';
 import { useAppStore } from './stores/appStore';
 
 function App() {
@@ -27,6 +30,9 @@ function App() {
             <Route path="/schueler-hinzufuegen" element={<AddStudent />} />
             <Route path="/sync" element={<SyncManager />} />
             <Route path="/einstellungen" element={<SettingsPage />} />
+            <Route path="/datenschutz" element={<PrivacyPolicy />} />
+            <Route path="/datenberichtigung" element={<DataCorrection />} />
+            <Route path="/datenuebertragbarkeit" element={<DataPortability />} />
           </Routes>
         </Layout>
       </div>

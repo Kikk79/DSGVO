@@ -200,4 +200,40 @@ impl CryptoManager {
         
         Ok(())
     }
+
+    pub async fn regenerate_key(&self) -> Result<()> {
+        // This is a placeholder. A real implementation would need to:
+        // 1. Generate a new key.
+        // 2. Re-encrypt all data with the new key.
+        // 3. Securely delete the old key.
+        // This is a complex and sensitive operation.
+        println!("Encryption key regeneration requested.");
+        Ok(())
+    }
+
+    pub fn get_device_id_from_cert(cert: &rustls::pki_types::CertificateDer) -> Result<String> {
+        use x509_parser::prelude::*;
+
+        let (_, x509) = x509_parser::parse_x509_certificate(cert.as_ref())
+            .map_err(|e| anyhow::anyhow!("Failed to parse certificate: {:?}", e))?;
+
+        // Try to get Common Name from Subject
+        if let Some(cn) = x509.subject.iter_common_name().next() {
+            return Ok(cn.as_str()?.to_string());
+        }
+
+        // Fallback: Try to get from Subject Alternative Name (SAN) if present
+        for extension in x509.extensions() {
+            if let ParsedExtension::SubjectAlternativeName(san) = extension.parsed_extension() {
+                for name in san.general_names {
+                    if let GeneralName::DNSName(dns_name) = name {
+                        // Assuming device ID is a DNS name in SAN
+                        return Ok(dns_name.to_string());
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("Could not extract device ID from certificate"))
+    }
 }

@@ -100,6 +100,9 @@ interface AppState {
   getDeviceConfig: () => Promise<void>;
   // eslint-disable-next-line no-unused-vars
   setDeviceConfig: (device_type: 'computer' | 'notebook', device_name?: string) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  changeDatabasePath: (new_path: string) => Promise<void>;
+  regenerateEncryptionKey: () => Promise<void>;
   
   // PIN Management
   generatePairingPin: () => Promise<ActivePin>;
@@ -422,9 +425,27 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
       throw err;
     }
+  throw err;
+    }
   },
 
-  // PIN Management implementations
+        throw err;
+    }
+  },
+
+  regenerateEncryptionKey: async () => {
+    set({ loading: true, error: null });
+    try {
+      await invoke('regenerate_encryption_key');
+      set({ loading: false, error: null });
+    } catch (err) {
+      set({
+        error: `Failed to regenerate encryption key: ${err}`,
+        loading: false
+      });
+      throw err;
+    }
+  },
   generatePairingPin: async (): Promise<ActivePin> => {
     set({ loading: true, error: null });
     

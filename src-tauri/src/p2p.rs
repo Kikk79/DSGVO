@@ -10,6 +10,7 @@ use base64::Engine;
 use std::io::Cursor;
 use tokio::sync::Mutex;
 use rand::Rng;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub struct P2PManager {
     crypto: Arc<CryptoManager>,
@@ -173,7 +174,7 @@ impl P2PManager {
                             if let Some(address) = info.get_addresses().iter().next() {
                                 let peer_info = PeerInfo {
                                     id: peer_id_from_service.clone(),
-                                    address: *address,
+                                    address: std::net::SocketAddr::new(*address, info.get_port()),
                                     last_seen: Utc::now(),
                                     certificate: "".to_string(), // Certificate will be exchanged during pairing
                                 };
@@ -194,7 +195,7 @@ impl P2PManager {
 
     pub async fn start_server(&mut self, port: u16) -> Result<()> {
         let (cert_pem, key_pem) = self.crypto.get_or_create_certificate_pair()?;
-        
+
         // Create TLS server configuration
         let mut cert_reader = Cursor::new(cert_pem.as_bytes());
         let certs = rustls_pemfile::certs(&mut cert_reader)
@@ -204,32 +205,34 @@ impl P2PManager {
         let private_key = rustls_pemfile::private_key(&mut key_reader)
             .context("Failed to parse private key")?
             .ok_or_else(|| anyhow::anyhow!("No private key found"))?;
-        
+
         let config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, private_key)
             .context("Failed to create server config")?;
-        
+
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let listener = TcpListener::bind(("127.0.0.1", port)).await
             .context("Failed to bind server socket")?;
-        
+
         tracing::info!("P2P server listening on port {}", port);
-        
+
         let crypto_clone = self.crypto.clone();
+        let db_clone = self.db.clone(); // Clone db here
         let handle = tokio::spawn(async move {
             while let Ok((stream, addr)) = listener.accept().await {
                 let acceptor_clone = acceptor.clone();
                 let crypto_clone = crypto_clone.clone();
-                
+                let db_clone = db_clone.clone(); // Clone db for each task
+
                 tokio::spawn(async move {
-                    if let Err(e) = Self::handle_connection(stream, acceptor_clone, crypto_clone).await {
+                    if let Err(e) = Self::handle_connection(stream, acceptor_clone, crypto_clone, db_clone).await {
                         tracing::error!("Connection error: {}", e);
                     }
                 });
             }
         });
-        
+
         self.server_handle = Some(handle);
         Ok(())
     }
@@ -238,53 +241,110 @@ impl P2PManager {
         stream: TcpStream,
         acceptor: TlsAcceptor,
         crypto: Arc<CryptoManager>,
+        db: Arc<Mutex<Database>>,
     ) -> Result<()> {
-        let tls_stream = acceptor.accept(stream).await
+        let mut tls_stream = acceptor.accept(stream).await
             .context("TLS handshake failed")?;
-        
+
         tracing::info!("Accepted TLS connection");
-        
-        // In a full implementation, this would:
+
         // 1. Authenticate the peer using their certificate
-        // 2. Handle sync requests (get/apply changesets)
-        // 3. Stream file chunks for attachments
-        // 4. Maintain connection state
-        
+        let (_read_half, conn) = tls_stream.get_mut(); // Get the rustls::Connection
+        let peer_cert = conn.peer_certificates()
+            .context("Failed to get peer certificate")?
+            .into_iter()
+            .next()
+            .context("No peer certificate found")?;
+
+        let peer_id = CryptoManager::get_device_id_from_cert(&peer_cert)?; // Assuming a method to extract device ID from cert
+        crypto.store_peer_certificate(&peer_id, &base64::engine::general_purpose::STANDARD.encode(peer_cert.as_ref()))?;
+
+        tracing::info!("Authenticated peer: {}", peer_id);
+
+        // --- Changeset Exchange Protocol ---
+        // 1. Receive peer's changesets
+        let mut len_bytes = [0u8; 8];
+        tls_stream.read_exact(&mut len_bytes).await?;
+        let peer_changesets_len = u64::from_le_bytes(len_bytes);
+        let mut peer_changesets = vec![0u8; peer_changesets_len as usize];
+        tls_stream.read_exact(&mut peer_changesets).await?;
+        tracing::info!("Received {} bytes of changesets from peer {}", peer_changesets_len, peer_id);
+
+        // 2. Apply peer's changesets
+        db.lock().await.apply_changeset(&peer_changesets, &peer_id).await?;
+        tracing::info!("Applied changesets from peer {}", peer_id);
+
+        // 3. Send our changesets
+        let our_changesets = db.lock().await.get_pending_changesets(&peer_id).await?;
+        let len = our_changesets.len() as u64;
+        tls_stream.write_all(&len.to_le_bytes()).await?;
+        tls_stream.write_all(&our_changesets).await?;
+        tracing::info!("Sent {} bytes of changesets to peer {}", len, peer_id);
+
         Ok(())
     }
 
     pub async fn sync_with_peer(&self, peer_id: &str) -> Result<()> {
-        if let Some(peer) = self.peers.get(peer_id) {
+        let peer_info_option = {
+            let peers = self.peers.lock().await;
+            peers.get(peer_id).cloned()
+        };
+
+        if let Some(peer) = peer_info_option {
             // Create TLS client configuration
+            let mut root_store = rustls::RootCertStore::empty();
+            // Add peer's certificate to root store for authentication
+            let peer_cert_der = base64::engine::general_purpose::STANDARD.decode(&peer.certificate)?;
+            root_store.add(rustls::pki_types::CertificateDer::from(peer_cert_der))?;
+
             let config = ClientConfig::builder()
-                .with_root_certificates(rustls::RootCertStore::empty())
-                .with_no_client_auth();
-            
+                .with_root_certificates(root_store)
+                .with_no_client_auth(); // Client authentication is handled by mTLS in handle_connection
+
             let connector = TlsConnector::from(Arc::new(config));
             let stream = TcpStream::connect(peer.address).await
                 .context("Failed to connect to peer")?;
-            
+
             let domain = rustls::pki_types::ServerName::try_from("localhost".to_string())
                 .context("Failed to parse server name")?;
-            
-            let _tls_stream = connector.connect(domain, stream).await
+
+            let mut tls_stream = connector.connect(domain, stream).await
                 .context("TLS handshake failed")?;
-            
-            // In a full implementation, this would:
-            // 1. Request changesets from peer since last sync
-            // 2. Send our changesets to peer
-            // 3. Handle conflicts using configured strategy
-            // 4. Update sync state
-            
+
+            tracing::info!("Successfully established TLS connection with peer {}", peer_id);
+
+            // --- Changeset Exchange Protocol ---
+            // 1. Send our changesets
+            let our_changesets = self.db.lock().await.get_pending_changesets(&peer.id).await?;
+            let len = our_changesets.len() as u64;
+            tls_stream.write_all(&len.to_le_bytes()).await?;
+            tls_stream.write_all(&our_changesets).await?;
+            tracing::info!("Sent {} bytes of changesets to peer {}", len, peer_id);
+
+            // 2. Receive peer's changesets
+            let mut len_bytes = [0u8; 8];
+            tls_stream.read_exact(&mut len_bytes).await?;
+            let peer_changesets_len = u64::from_le_bytes(len_bytes);
+            let mut peer_changesets = vec![0u8; peer_changesets_len as usize];
+            tls_stream.read_exact(&mut peer_changesets).await?;
+            tracing::info!("Received {} bytes of changesets from peer {}", peer_changesets_len, peer_id);
+
+            // 3. Apply peer's changesets
+            self.db.lock().await.apply_changeset(&peer_changesets, &peer.id).await?;
+            tracing::info!("Applied changesets from peer {}", peer_id);
+
+            // Update sync_state (last_push and last_pull are updated in get_pending_changesets and apply_changeset)
             tracing::info!("Successfully synced with peer {}", peer_id);
+        } else {
+            tracing::warn!("Peer {} not found for synchronization.", peer_id);
         }
-        
+
         Ok(())
     }
 
     pub async fn get_status(&self) -> Result<SyncStatus> {
         Ok(SyncStatus {
-            peer_connected: !self.peers.is_empty(),
+            peer_connected: !self.peers.lock().await.is_empty(),
             last_sync: None, // Would be retrieved from database
             pending_changes: 0, // Would be calculated from changesets
         })
@@ -297,7 +357,7 @@ impl P2PManager {
         // Store peer certificate securely
         self.crypto.store_peer_certificate(&peer_id, &certificate)?;
         
-        self.peers.insert(peer_id.clone(), PeerInfo {
+        self.peers.lock().await.insert(peer_id.clone(), PeerInfo {
             id: peer_id,
             address: addr,
             last_seen: Utc::now(),
@@ -393,7 +453,7 @@ impl P2PManager {
     }
     
     pub async fn sync_with_peers(&mut self) -> Result<()> {
-        for peer_id in self.peers.keys().cloned().collect::<Vec<_>>() {
+        for peer_id in self.peers.lock().await.keys().cloned().collect::<Vec<String>>() {
             if let Err(e) = self.sync_with_peer(&peer_id).await {
                 tracing::error!("Failed to sync with peer {}: {}", peer_id, e);
             }

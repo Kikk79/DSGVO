@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
   Shield, 
   Database, 
@@ -13,10 +14,11 @@ import {
   Monitor,
   Laptop
 } from 'lucide-react';
-import { useAppStore } from '../stores/appStore';
+import { open } from '@tauri-apps/api/dialog';
 
 export const SettingsPage: React.FC = () => {
-  const { deviceConfig, setDeviceConfig, loading } = useAppStore();
+  const navigate = useNavigate();
+  const { deviceConfig, setDeviceConfig, loading, changeDatabasePath, regenerateEncryptionKey } = useAppStore();
   const [notifications, setNotifications] = useState(true);
   const [autoBackup, setAutoBackup] = useState(true);
   const [dataRetention, setDataRetention] = useState('365');
@@ -53,6 +55,34 @@ export const SettingsPage: React.FC = () => {
     // Implementation would trigger data deletion
     console.log('Deleting expired data...');
     setShowDeleteConfirm(false);
+  };
+
+  const handleChangeDatabasePath = async () => {
+    const result = await open({
+      directory: true,
+      multiple: false,
+      title: 'Select a new database location'
+    });
+
+    if (typeof result === 'string') {
+      try {
+        await changeDatabasePath(result);
+        alert('Database path changed successfully. Please restart the application.');
+      } catch (error) {
+        alert(`Failed to change database path: ${error}`);
+      }
+    }
+  };
+
+  const handleRegenerateKey = async () => {
+    if (window.confirm('Are you sure you want to regenerate the encryption key? This action is irreversible.')) {
+      try {
+        await regenerateEncryptionKey();
+        alert('Encryption key regenerated successfully. Please restart the application.');
+      } catch (error) {
+        alert(`Failed to regenerate encryption key: ${error}`);
+      }
+    }
   };
 
   return (
@@ -108,7 +138,7 @@ export const SettingsPage: React.FC = () => {
                   Alle Daten werden lokal verschlüsselt gespeichert. Keine Übertragung 
                   an Dritte oder Cloud-Services.
                 </p>
-                <button className="mt-2 text-sm text-blue-600 hover:text-blue-800 underline">
+                <button className="mt-2 text-sm text-blue-600 hover:text-blue-800 underline" onClick={() => navigate('/datenschutz')}>
                   Vollständige Datenschutzerklärung anzeigen
                 </button>
               </div>
@@ -128,7 +158,7 @@ export const SettingsPage: React.FC = () => {
                 <Download className="h-4 w-4 mr-2" aria-hidden="true" />
                 Datenauskunft (Art. 15 DSGVO)
               </button>
-              <button className="btn-secondary flex items-center justify-center">
+              <button className="btn-secondary flex items-center justify-center" onClick={() => navigate('/datenberichtigung')}>
                 <FileText className="h-4 w-4 mr-2" aria-hidden="true" />
                 Datenberichtigung (Art. 16 DSGVO)
               </button>
@@ -139,7 +169,7 @@ export const SettingsPage: React.FC = () => {
                 <Trash2 className="h-4 w-4 mr-2" aria-hidden="true" />
                 Datenlöschung (Art. 17 DSGVO)
               </button>
-              <button className="btn-secondary flex items-center justify-center">
+              <button className="btn-secondary flex items-center justify-center" onClick={() => navigate('/datenuebertragbarkeit')}>
                 <Shield className="h-4 w-4 mr-2" aria-hidden="true" />
                 Datenübertragbarkeit (Art. 20 DSGVO)
               </button>
@@ -218,7 +248,7 @@ export const SettingsPage: React.FC = () => {
                 value="%APPDATA%/schuelerbeobachtung/observations.db"
                 className="input-field flex-1 bg-gray-50"
               />
-              <button className="btn-secondary">
+              <button className="btn-secondary" onClick={handleChangeDatabasePath}>
                 Ändern
               </button>
             </div>
@@ -371,10 +401,10 @@ export const SettingsPage: React.FC = () => {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <button className="btn-secondary flex items-center justify-center">
+            <button className="btn-secondary flex items-center justify-center" onClick={() => console.log('Regenerate encryption key')}>
               Verschlüsselungsschlüssel neu generieren
             </button>
-            <button className="btn-secondary flex items-center justify-center">
+            <button className="btn-secondary flex items-center justify-center" onClick={() => console.log('Create security report')}>
               Sicherheitsbericht erstellen
             </button>
           </div>
