@@ -7,7 +7,9 @@
       "Bash(grep:*)",
       "Bash(rustup target list:*)",
       "Bash(npm run tauri build:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "mcp__lmstudio-mcp__get_current_model",
+      "mcp__lmstudio-mcp__list_models"
     ],
     "deny": []
   }
