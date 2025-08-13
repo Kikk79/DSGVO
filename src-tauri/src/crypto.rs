@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
-use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
-    ChaCha20Poly1305, Key, Nonce,
-};
-use keyring::Entry;
 use uuid::Uuid;
-use base64::prelude::*;
 use std::{collections::HashMap, fs, path::PathBuf};
 use directories::ProjectDirs;
+
+// Encryption disabled - using plaintext storage
+// Original encryption dependencies commented out:
+// use chacha20poly1305::{
+//     aead::{Aead, AeadCore, KeyInit, OsRng},
+//     ChaCha20Poly1305, Key, Nonce,
+// };
+// use keyring::Entry;
+// use base64::prelude::*;
 
 fn data_dir() -> Result<PathBuf> {
     let proj = ProjectDirs::from("", "", "schuelerbeobachtung")
@@ -37,46 +40,29 @@ fn save_secrets(map: &HashMap<String, String>) -> Result<()> {
 }
 
 fn secret_get(name: &str) -> Result<Option<String>> {
-    // Try keyring first
-    if std::env::var("DISABLE_KEYRING").ok().as_deref() != Some("1") {
-        if let Ok(entry) = Entry::new("schuelerbeobachtung", name) {
-            if let Ok(val) = entry.get_password() {
-                return Ok(Some(val));
-            }
-        }
-    }
-    // Fallback to file
+    // Keyring disabled - using file storage only
     let map = load_secrets();
     Ok(map.get(name).cloned())
 }
 
 fn secret_set(name: &str, value: &str) -> Result<()> {
-    // Try keyring first unless disabled
-    if std::env::var("DISABLE_KEYRING").ok().as_deref() != Some("1") {
-        if let Ok(entry) = Entry::new("schuelerbeobachtung", name) {
-            if entry.set_password(value).is_ok() {
-                return Ok(());
-            }
-        }
-    }
-    // Fallback to file
+    // Keyring disabled - using file storage only
     let mut map = load_secrets();
     map.insert(name.to_string(), value.to_string());
     save_secrets(&map)
 }
 
 pub struct CryptoManager {
-    cipher: ChaCha20Poly1305,
+    // Encryption disabled - cipher removed
     device_id: String,
 }
 
 impl CryptoManager {
     pub fn new() -> Result<Self> {
         let device_id = Self::get_or_create_device_id()?;
-        let key = Self::get_or_create_key(&device_id)?;
-        let cipher = ChaCha20Poly1305::new(&key);
-
-        Ok(Self { cipher, device_id })
+        // Encryption disabled - no key or cipher initialization
+        println!("CryptoManager initialized WITHOUT encryption");
+        Ok(Self { device_id })
     }
 
     fn get_or_create_device_id() -> Result<String> {
@@ -86,45 +72,19 @@ impl CryptoManager {
         Ok(device_id)
     }
 
-    fn get_or_create_key(device_id: &str) -> Result<Key> {
-        let name = format!("encryption_key_{}", device_id);
-        if let Some(key_base64) = secret_get(&name)? {
-            let key_bytes = BASE64_STANDARD
-                .decode(&key_base64)
-                .context("Failed to decode encryption key from base64")?;
-            if key_bytes.len() != 32 { anyhow::bail!("Invalid key length"); }
-            return Ok(Key::from_slice(&key_bytes).clone());
-        }
-        // Generate and store
-        let key = ChaCha20Poly1305::generate_key(&mut OsRng);
-        let key_base64 = BASE64_STANDARD.encode(&key);
-        secret_set(&name, &key_base64).context("Failed to persist encryption key")?;
-        Ok(key)
-    }
+    // Key generation disabled - no longer needed
+    // fn get_or_create_key(device_id: &str) -> Result<Key> { ... }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let ciphertext = self.cipher.encrypt(&nonce, plaintext)
-            .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
-        
-        // Prepend nonce to ciphertext
-        let mut result = nonce.to_vec();
-        result.extend_from_slice(&ciphertext);
-        Ok(result)
+        // Encryption disabled - return plaintext as-is
+        println!("CryptoManager: encrypt() called - returning plaintext (NO ENCRYPTION)");
+        Ok(plaintext.to_vec())
     }
 
     pub fn decrypt(&self, encrypted_data: &[u8]) -> Result<Vec<u8>> {
-        if encrypted_data.len() < 12 {
-            anyhow::bail!("Invalid encrypted data length");
-        }
-
-        let (nonce_bytes, ciphertext) = encrypted_data.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        
-        let plaintext = self.cipher.decrypt(nonce, ciphertext)
-            .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
-        
-        Ok(plaintext)
+        // Encryption disabled - return data as-is
+        println!("CryptoManager: decrypt() called - returning data as-is (NO DECRYPTION)");
+        Ok(encrypted_data.to_vec())
     }
 
     pub fn get_device_id(&self) -> String {

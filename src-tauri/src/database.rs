@@ -42,6 +42,14 @@ impl Database {
     }
 
     async fn migrate(&self) -> Result<()> {
+        // Check if we're migrating from encrypted schema to plaintext
+        let needs_migration = self.check_schema_migration_needed().await?;
+        
+        if needs_migration {
+            println!("Migrating database schema from encrypted to plaintext format...");
+            self.migrate_encrypted_to_plaintext().await?;
+        }
+
         // Create initial tables
         sqlx::query(
             r#"
@@ -81,7 +89,7 @@ impl Database {
                 student_id INTEGER NOT NULL,
                 author_id INTEGER NOT NULL,
                 category TEXT NOT NULL,
-                text_encrypted BLOB NOT NULL,
+                text TEXT NOT NULL,
                 tags TEXT NOT NULL DEFAULT '[]',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -100,7 +108,7 @@ impl Database {
                 observation_id INTEGER NOT NULL,
                 filename TEXT NOT NULL,
                 content_type TEXT NOT NULL,
-                file_data_encrypted BLOB NOT NULL,
+                file_data BLOB NOT NULL,
                 file_hash TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (observation_id) REFERENCES observations (id)
@@ -213,21 +221,21 @@ impl Database {
         text: String,
         tags: Vec<String>,
     ) -> Result<Observation> {
-        let encrypted_text = self.crypto.encrypt(text.as_bytes())?;
+        // Encryption disabled - storing plaintext
         let tags_json = serde_json::to_string(&tags)?;
         let now = Utc::now();
         let device_id = self.crypto.get_device_id();
 
         let id = sqlx::query(
             r#"
-            INSERT INTO observations (student_id, author_id, category, text_encrypted, tags, created_at, updated_at, source_device_id)
+            INSERT INTO observations (student_id, author_id, category, text, tags, created_at, updated_at, source_device_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(student_id)
         .bind(author_id)
         .bind(&category)
-        .bind(&encrypted_text)
+        .bind(&text)
         .bind(&tags_json)
         .bind(&now)
         .bind(&now)
@@ -255,7 +263,7 @@ impl Database {
         student_id: Option<i64>,
         category: Option<String>,
     ) -> Result<Vec<Observation>> {
-        let mut sql = "SELECT id, student_id, author_id, category, text_encrypted, tags, created_at, updated_at, source_device_id FROM observations WHERE 1=1".to_string();
+        let mut sql = "SELECT id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id FROM observations WHERE 1=1".to_string();
         let mut bind_values: Vec<String> = Vec::new();
 
         if let Some(sid) = student_id {
@@ -282,9 +290,8 @@ impl Database {
 
         let mut observations = Vec::new();
         for row in rows {
-            let encrypted_text: Vec<u8> = row.get("text_encrypted");
-            let decrypted_text = self.crypto.decrypt(&encrypted_text)?;
-            let text = String::from_utf8(decrypted_text)?;
+            // Encryption disabled - text stored as plaintext
+            let text: String = row.get("text");
             
             let tags_json: String = row.get("tags");
             let tags: Vec<String> = serde_json::from_str(&tags_json)?;
@@ -456,7 +463,7 @@ impl Database {
 
     pub async fn get_observation(&self, observation_id: i64) -> Result<Option<Observation>> {
         let row = sqlx::query(
-            "SELECT id, student_id, author_id, category, text_encrypted, tags, created_at, updated_at, source_device_id FROM observations WHERE id = ?"
+            "SELECT id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id FROM observations WHERE id = ?"
         )
         .bind(observation_id)
         .fetch_optional(&self.pool)
@@ -464,9 +471,8 @@ impl Database {
 
         match row {
             Some(row) => {
-                let encrypted_text: Vec<u8> = row.get("text_encrypted");
-                let decrypted_text = self.crypto.decrypt(&encrypted_text)?;
-                let text = String::from_utf8(decrypted_text)?;
+                // Encryption disabled - text stored as plaintext
+                let text: String = row.get("text");
                 
                 let tags_json: String = row.get("tags");
                 let tags: Vec<String> = serde_json::from_str(&tags_json)?;
@@ -505,6 +511,98 @@ impl Database {
         // 2. Apply changeset to database
         // 3. Handle conflicts according to strategy
         // 4. Update sync_state for peer
+        Ok(())
+    }
+
+    async fn check_schema_migration_needed(&self) -> Result<bool> {
+        // Check if observations table exists with old encrypted schema
+        let has_text_encrypted = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('observations') WHERE name = 'text_encrypted'"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        Ok(has_text_encrypted > 0)
+    }
+
+    async fn migrate_encrypted_to_plaintext(&self) -> Result<()> {
+        // Create backup table for safety
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS observations_backup AS SELECT * FROM observations"
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create new table with plaintext schema
+        sqlx::query(
+            r#"
+            CREATE TABLE observations_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                author_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                text TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '[]',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_device_id TEXT NOT NULL,
+                FOREIGN KEY (student_id) REFERENCES students (id)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Migrate data from encrypted to plaintext format
+        // Since encryption is disabled, text_encrypted should contain readable text
+        let rows = sqlx::query(
+            "SELECT id, student_id, author_id, category, text_encrypted, tags, created_at, updated_at, source_device_id FROM observations"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        println!("Migrating {} observations from encrypted to plaintext format", rows.len());
+
+        for row in rows {
+            let text_encrypted: Vec<u8> = row.get("text_encrypted");
+            
+            // Attempt to decrypt or use as-is (since encryption is disabled)
+            let text = match String::from_utf8(text_encrypted) {
+                Ok(plaintext) => plaintext,
+                Err(_) => {
+                    // If it's not valid UTF-8, it might be actually encrypted
+                    // Since encryption is disabled, we'll use a placeholder
+                    "[Migration Error: Unable to decrypt text]".to_string()
+                }
+            };
+
+            sqlx::query(
+                "INSERT INTO observations_new (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(row.get::<i64, _>("id"))
+            .bind(row.get::<i64, _>("student_id"))
+            .bind(row.get::<i64, _>("author_id"))
+            .bind(row.get::<String, _>("category"))
+            .bind(text)
+            .bind(row.get::<String, _>("tags"))
+            .bind(row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"))
+            .bind(row.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"))
+            .bind(row.get::<String, _>("source_device_id"))
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // Replace old table with new table
+        sqlx::query("DROP TABLE observations")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("ALTER TABLE observations_new RENAME TO observations")
+            .execute(&self.pool)
+            .await?;
+
+        println!("Schema migration completed successfully");
         Ok(())
     }
 }

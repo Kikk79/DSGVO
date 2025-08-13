@@ -31,8 +31,9 @@ rustls-pemfile = "2.0"
 tokio-rustls = "0.25"
 mdns-sd = "0.10"
 rcgen = "0.12"
-keyring = "2.3"
-chacha20poly1305 = "0.10"
+# Encryption dependencies disabled
+# keyring = "2.3"
+# chacha20poly1305 = "0.10"
 rand = "0.8"
 env_logger = "0.11.3"
 

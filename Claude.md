@@ -27,7 +27,7 @@ instance should read these essential files in order:
 🎯 Core Understanding (Read First)
 
 1. README.md - Complete project overview, architecture, features, and roadmap
-2. ***
+2. .serena/memories/\*.md - COMPLETE OVERVIEW
 3. package.json - Dependencies, scripts, and project metadata
 4. src-tauri/Cargo.toml - Rust dependencies and build configuration
 
