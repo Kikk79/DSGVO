@@ -115,7 +115,7 @@ impl GdprManager {
         }
     }
 
-    pub async fn anonymize_expired_data(&self, db: &Database) -> Result<u32> {
+    pub async fn anonymize_expired_data(&self, _db: &Database) -> Result<u32> {
         let policy = Self::get_retention_policy();
         let cutoff_date = Utc::now() - Duration::days(policy.anonymization_after_days as i64);
         
@@ -129,7 +129,7 @@ impl GdprManager {
         Ok(0) // Return count of anonymized records
     }
 
-    pub async fn delete_expired_data(&self, db: &Database) -> Result<u32> {
+    pub async fn delete_expired_data(&self, _db: &Database) -> Result<u32> {
         let policy = Self::get_retention_policy();
         let cutoff_date = Utc::now() - Duration::days(policy.observation_retention_days as i64);
         
@@ -208,7 +208,7 @@ impl GdprManager {
         })
     }
 
-    pub async fn conduct_data_audit(&self, db: &Database) -> Result<Value> {
+    pub async fn conduct_data_audit(&self, _db: &Database) -> Result<Value> {
         // Data Protection Impact Assessment (DPIA) automation
         let audit_results = json!({
             "audit_date": Utc::now(),

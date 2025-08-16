@@ -13,7 +13,7 @@ use rand::Rng;
 
 pub struct P2PManager {
     crypto: Arc<CryptoManager>,
-    db: Arc<Mutex<Database>>,
+    _db: Arc<Mutex<Database>>,
     device_id: String,
     peers: HashMap<String, PeerInfo>,
     mdns_daemon: Option<ServiceDaemon>,
@@ -23,16 +23,16 @@ pub struct P2PManager {
 
 #[derive(Clone)]
 struct PeerInfo {
-    id: String,
+    _id: String,
     address: std::net::SocketAddr,
-    last_seen: DateTime<Utc>,
-    certificate: String,
+    _last_seen: DateTime<Utc>,
+    _certificate: String,
 }
 
 #[derive(Clone)]
 pub struct PinData {
     pub pairing_code: String,
-    pub device_id: String,
+    pub _device_id: String,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -49,7 +49,7 @@ impl P2PManager {
         
         Ok(Self {
             crypto,
-            db,
+            _db: db,
             device_id,
             peers: HashMap::new(),
             mdns_daemon: None,
@@ -76,7 +76,7 @@ impl P2PManager {
         // Store the PIN mapping
         let pin_data = PinData {
             pairing_code,
-            device_id: self.device_id.clone(),
+            _device_id: self.device_id.clone(),
             expires_at,
         };
         
@@ -155,7 +155,7 @@ impl P2PManager {
             .context("Failed to start service browsing")?;
         
         // Spawn task to handle discovered services
-        let crypto_clone = self.crypto.clone();
+        let _crypto_clone = self.crypto.clone();
         let device_id_clone = self.device_id.clone();
         tokio::spawn(async move {
             while let Ok(event) = receiver.recv_async().await {
@@ -204,7 +204,7 @@ impl P2PManager {
         
         let crypto_clone = self.crypto.clone();
         let handle = tokio::spawn(async move {
-            while let Ok((stream, addr)) = listener.accept().await {
+            while let Ok((stream, _addr)) = listener.accept().await {
                 let acceptor_clone = acceptor.clone();
                 let crypto_clone = crypto_clone.clone();
                 
@@ -223,9 +223,9 @@ impl P2PManager {
     async fn handle_connection(
         stream: TcpStream,
         acceptor: TlsAcceptor,
-        crypto: Arc<CryptoManager>,
+        _crypto: Arc<CryptoManager>,
     ) -> Result<()> {
-        let tls_stream = acceptor.accept(stream).await
+        let _tls_stream = acceptor.accept(stream).await
             .context("TLS handshake failed")?;
         
         tracing::info!("Accepted TLS connection");
@@ -284,10 +284,10 @@ impl P2PManager {
         self.crypto.store_peer_certificate(&peer_id, &certificate)?;
         
         self.peers.insert(peer_id.clone(), PeerInfo {
-            id: peer_id,
+            _id: peer_id,
             address: addr,
-            last_seen: Utc::now(),
-            certificate,
+            _last_seen: Utc::now(),
+            _certificate: certificate,
         });
         
         Ok(())
@@ -308,9 +308,26 @@ impl P2PManager {
     }
 
     pub async fn process_pairing_code(&mut self, pairing_code: &str, peer_address: String) -> Result<String> {
-        // Always treat input as the full pairing code - no PIN lookup
+        // Check if input is a 6-digit PIN or a full pairing code
+        let actual_pairing_code = if pairing_code.len() == 6 && pairing_code.chars().all(|c| c.is_ascii_digit()) {
+            // This is a PIN - look up the corresponding pairing code
+            let pin_storage = self.pin_storage.lock().await;
+            let pin_data = pin_storage.get(pairing_code)
+                .context("PIN not found or expired")?;
+            
+            // Check if PIN has expired
+            if pin_data.expires_at <= Utc::now() {
+                return Err(anyhow::anyhow!("PIN has expired"));
+            }
+            
+            pin_data.pairing_code.clone()
+        } else {
+            // This is a full pairing code
+            pairing_code.to_string()
+        };
+        
         let pairing_data: serde_json::Value = serde_json::from_str(
-            &String::from_utf8(base64::prelude::BASE64_STANDARD.decode(pairing_code)?)?
+            &String::from_utf8(base64::prelude::BASE64_STANDARD.decode(&actual_pairing_code)?)?
         ).context("Invalid pairing code format")?;
         
         let peer_id = pairing_data["device_id"].as_str()
