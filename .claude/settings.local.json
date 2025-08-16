@@ -1,14 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "mcp__serena__list_dir",
+
       "Bash(npm run tauri:build:*)",
       "Bash(git log:*)",
       "Bash(grep:*)",
       "Bash(rustup target list:*)",
       "Bash(npm run tauri build:*)",
       "Bash(bash:*)",
-      "Bash(cargo check:*)"
+
     ],
     "deny": []
   }
