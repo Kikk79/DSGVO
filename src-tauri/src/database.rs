@@ -145,7 +145,7 @@ impl Database {
     }
 
     pub async fn get_students(&self) -> Result<Vec<Student>> {
-        let rows = sqlx::query("SELECT id, class_id, first_name, last_name, status FROM students WHERE status = 'active' ORDER BY last_name, first_name")
+        let rows = sqlx::query("SELECT id, class_id, first_name, last_name, status, created_at, updated_at, source_device_id FROM students WHERE status = 'active' ORDER BY last_name, first_name")
             .fetch_all(&self.pool)
             .await?;
 
@@ -157,13 +157,16 @@ impl Database {
                 first_name: row.get("first_name"),
                 last_name: row.get("last_name"),
                 status: row.get("status"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                source_device_id: row.get("source_device_id"),
             });
         }
         Ok(students)
     }
 
     pub async fn get_classes(&self) -> Result<Vec<Class>> {
-        let rows = sqlx::query("SELECT id, name, school_year FROM classes ORDER BY school_year DESC, name")
+        let rows = sqlx::query("SELECT id, name, school_year, created_at, updated_at, source_device_id FROM classes ORDER BY school_year DESC, name")
             .fetch_all(&self.pool)
             .await?;
 
@@ -173,44 +176,75 @@ impl Database {
                 id: row.get("id"),
                 name: row.get("name"),
                 school_year: row.get("school_year"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                source_device_id: row.get("source_device_id"),
             });
         }
         Ok(classes)
     }
 
     pub async fn create_class(&self, name: String, school_year: String) -> Result<Class> {
+        let device_id = self.crypto.get_device_id();
+        let now = chrono::Utc::now();
+        
         let id = sqlx::query(
             r#"
-            INSERT INTO classes (name, school_year)
-            VALUES (?, ?)
+            INSERT INTO classes (name, school_year, created_at, updated_at, source_device_id)
+            VALUES (?, ?, ?, ?, ?)
             "#,
         )
         .bind(&name)
         .bind(&school_year)
+        .bind(now)
+        .bind(now)
+        .bind(&device_id)
         .execute(&self.pool)
         .await?
         .last_insert_rowid();
 
-        Ok(Class { id, name, school_year })
+        Ok(Class { 
+            id, 
+            name, 
+            school_year,
+            created_at: now,
+            updated_at: now,
+            source_device_id: device_id,
+        })
     }
 
     pub async fn create_student(&self, class_id: i64, first_name: String, last_name: String, status: Option<String>) -> Result<Student> {
         let status = status.unwrap_or_else(|| "active".to_string());
+        let device_id = self.crypto.get_device_id();
+        let now = chrono::Utc::now();
+        
         let id = sqlx::query(
             r#"
-            INSERT INTO students (class_id, first_name, last_name, status)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO students (class_id, first_name, last_name, status, created_at, updated_at, source_device_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(class_id)
         .bind(&first_name)
         .bind(&last_name)
         .bind(&status)
+        .bind(now)
+        .bind(now)
+        .bind(&device_id)
         .execute(&self.pool)
         .await?
         .last_insert_rowid();
 
-        Ok(Student { id, class_id, first_name, last_name, status })
+        Ok(Student { 
+            id, 
+            class_id, 
+            first_name, 
+            last_name, 
+            status,
+            created_at: now,
+            updated_at: now,
+            source_device_id: device_id,
+        })
     }
 
     pub async fn create_observation(
@@ -250,7 +284,7 @@ impl Database {
             author_id,
             category,
             text,
-            tags,
+            tags: tags_json,
             created_at: now,
             updated_at: now,
             source_device_id: device_id,
@@ -294,7 +328,7 @@ impl Database {
             let text: String = row.get("text");
             
             let tags_json: String = row.get("tags");
-            let tags: Vec<String> = serde_json::from_str(&tags_json)?;
+            let _tags_vec: Vec<String> = serde_json::from_str(&tags_json)?;
 
             // If there's a text query, filter by decrypted content
             if let Some(ref q) = query_lc {
@@ -309,7 +343,7 @@ impl Database {
                 author_id: row.get("author_id"),
                 category: row.get("category"),
                 text,
-                tags,
+                tags: tags_json,
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
                 source_device_id: row.get("source_device_id"),
@@ -475,7 +509,7 @@ impl Database {
                 let text: String = row.get("text");
                 
                 let tags_json: String = row.get("tags");
-                let tags: Vec<String> = serde_json::from_str(&tags_json)?;
+                let _tags_vec: Vec<String> = serde_json::from_str(&tags_json)?;
 
                 Ok(Some(Observation {
                     id: row.get("id"),
@@ -483,7 +517,7 @@ impl Database {
                     author_id: row.get("author_id"),
                     category: row.get("category"),
                     text,
-                    tags,
+                    tags: tags_json,
                     created_at: row.get("created_at"),
                     updated_at: row.get("updated_at"),
                     source_device_id: row.get("source_device_id"),
@@ -493,24 +527,129 @@ impl Database {
         }
     }
 
-    pub async fn get_pending_changesets(&self, peer_id: &str) -> Result<Vec<u8>> {
-        // This would implement SQLite session/changeset functionality
-        // For now, return empty changeset
-        // In a full implementation, this would:
-        // 1. Start a session
-        // 2. Compare with peer's last_seq
-        // 3. Generate changeset for all changes since then
-        // 4. Return signed, versioned changeset
-        Ok(Vec::new())
+    pub async fn get_pending_changesets(&self, _peer_id: &str) -> Result<Vec<u8>> {
+        // Get all changes since last sync timestamp for the peer
+        // For simplicity, we'll export all recent changes as a JSON changeset
+        let mut changeset = serde_json::json!({
+            "version": "1.0",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "changes": {
+                "students": [],
+                "classes": [],
+                "observations": []
+            }
+        });
+
+        // Get recent students (within last 30 days)
+        let students = sqlx::query_as::<_, Student>(
+            "SELECT * FROM students WHERE updated_at > datetime('now', '-30 days')"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        changeset["changes"]["students"] = serde_json::to_value(students)?;
+
+        // Get recent classes (within last 30 days)
+        let classes = sqlx::query_as::<_, Class>(
+            "SELECT * FROM classes WHERE updated_at > datetime('now', '-30 days')"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        changeset["changes"]["classes"] = serde_json::to_value(classes)?;
+
+        // Get recent observations (within last 30 days)
+        let observations = sqlx::query_as::<_, Observation>(
+            "SELECT * FROM observations WHERE updated_at > datetime('now', '-30 days')"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        changeset["changes"]["observations"] = serde_json::to_value(observations)?;
+
+        let changeset_str = serde_json::to_string(&changeset)?;
+        Ok(changeset_str.into_bytes())
     }
 
-    pub async fn apply_changeset(&self, changeset: &[u8], peer_id: &str) -> Result<()> {
-        // This would apply SQLite changeset
-        // In a full implementation, this would:
-        // 1. Verify changeset signature
-        // 2. Apply changeset to database
-        // 3. Handle conflicts according to strategy
-        // 4. Update sync_state for peer
+    pub async fn apply_changeset(&self, changeset: &[u8], _peer_id: &str) -> Result<()> {
+        // Parse the JSON changeset
+        let changeset_str = String::from_utf8(changeset.to_vec())?;
+        let changeset_data: serde_json::Value = serde_json::from_str(&changeset_str)?;
+
+        // Verify changeset format
+        if changeset_data["version"].as_str() != Some("1.0") {
+            return Err(anyhow::anyhow!("Unsupported changeset version"));
+        }
+
+        let changes = &changeset_data["changes"];
+
+        // Apply student changes
+        if let Some(students) = changes["students"].as_array() {
+            for student_data in students {
+                let student: Student = serde_json::from_value(student_data.clone())?;
+                // Use INSERT OR REPLACE to handle both updates and inserts
+                sqlx::query(
+                    "INSERT OR REPLACE INTO students (id, class_id, first_name, last_name, status, created_at, updated_at, source_device_id) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                .bind(student.id)
+                .bind(student.class_id)
+                .bind(&student.first_name)
+                .bind(&student.last_name)
+                .bind(&student.status)
+                .bind(&student.created_at)
+                .bind(&student.updated_at)
+                .bind(&student.source_device_id)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+
+        // Apply class changes
+        if let Some(classes) = changes["classes"].as_array() {
+            for class_data in classes {
+                let class: Class = serde_json::from_value(class_data.clone())?;
+                sqlx::query(
+                    "INSERT OR REPLACE INTO classes (id, name, school_year, created_at, updated_at, source_device_id) 
+                     VALUES (?, ?, ?, ?, ?, ?)"
+                )
+                .bind(class.id)
+                .bind(&class.name)
+                .bind(&class.school_year)
+                .bind(&class.created_at)
+                .bind(&class.updated_at)
+                .bind(&class.source_device_id)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+
+        // Apply observation changes
+        if let Some(observations) = changes["observations"].as_array() {
+            for obs_data in observations {
+                let observation: Observation = serde_json::from_value(obs_data.clone())?;
+                // Encrypt the text before storing
+                let encrypted_text = self.crypto.encrypt(observation.text.as_bytes())?;
+                sqlx::query(
+                    "INSERT OR REPLACE INTO observations (id, student_id, category, text, tags, created_at, updated_at, source_device_id) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                .bind(observation.id)
+                .bind(observation.student_id)
+                .bind(&observation.category)
+                .bind(&encrypted_text)
+                .bind(&observation.tags)
+                .bind(&observation.created_at)
+                .bind(&observation.updated_at)
+                .bind(&observation.source_device_id)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+
+        tracing::info!("Successfully applied changeset with {} students, {} classes, {} observations",
+            changes["students"].as_array().map(|a| a.len()).unwrap_or(0),
+            changes["classes"].as_array().map(|a| a.len()).unwrap_or(0),
+            changes["observations"].as_array().map(|a| a.len()).unwrap_or(0)
+        );
+
         Ok(())
     }
 

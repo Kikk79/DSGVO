@@ -7,7 +7,8 @@
       "Bash(grep:*)",
       "Bash(rustup target list:*)",
       "Bash(npm run tauri build:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(cargo check:*)"
     ],
     "deny": []
   }

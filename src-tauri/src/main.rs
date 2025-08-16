@@ -14,13 +14,16 @@ use base64::Engine;
 use p2p::ActivePin;
 
 // Data structures
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct Student {
     pub id: i64,
     pub class_id: i64,
     pub first_name: String,
     pub last_name: String,
     pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub source_device_id: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -29,21 +32,24 @@ pub struct DeviceConfig {
     pub device_name: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct Class {
     pub id: i64,
     pub name: String,
     pub school_year: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub source_device_id: String,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct Observation {
     pub id: i64,
     pub student_id: i64,
     pub author_id: i64,
     pub category: String,
     pub text: String,
-    pub tags: Vec<String>,
+    pub tags: String, // Store as JSON string for SQLx compatibility
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub source_device_id: String,
