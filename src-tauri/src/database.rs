@@ -58,7 +58,8 @@ impl Database {
                 name TEXT NOT NULL,
                 school_year TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_device_id TEXT NOT NULL DEFAULT ''
             )
             "#,
         )
@@ -75,6 +76,7 @@ impl Database {
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_device_id TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (class_id) REFERENCES classes (id)
             )
             "#,
@@ -140,6 +142,57 @@ impl Database {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_observations_created ON observations(created_at)")
             .execute(&self.pool)
             .await?;
+
+        // Migrate existing tables to add source_device_id columns if they don't exist
+        self.add_missing_columns().await?;
+
+        Ok(())
+    }
+
+    async fn add_missing_columns(&self) -> Result<()> {
+        let device_id = self.crypto.get_device_id();
+        
+        // Check and add source_device_id to classes table
+        let classes_has_column = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('classes') WHERE name = 'source_device_id'"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        if classes_has_column == 0 {
+            println!("Adding source_device_id column to classes table...");
+            sqlx::query("ALTER TABLE classes ADD COLUMN source_device_id TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await?;
+            
+            // Update existing records with current device ID
+            sqlx::query("UPDATE classes SET source_device_id = ? WHERE source_device_id = ''")
+                .bind(&device_id)
+                .execute(&self.pool)
+                .await?;
+        }
+
+        // Check and add source_device_id to students table
+        let students_has_column = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('students') WHERE name = 'source_device_id'"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        if students_has_column == 0 {
+            println!("Adding source_device_id column to students table...");
+            sqlx::query("ALTER TABLE students ADD COLUMN source_device_id TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await?;
+            
+            // Update existing records with current device ID
+            sqlx::query("UPDATE students SET source_device_id = ? WHERE source_device_id = ''")
+                .bind(&device_id)
+                .execute(&self.pool)
+                .await?;
+        }
 
         Ok(())
     }

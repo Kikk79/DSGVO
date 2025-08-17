@@ -208,7 +208,7 @@ export const StudentSearch: React.FC = () => {
                         <Calendar className="h-4 w-4 mr-1" aria-hidden="true" />
                         {format(new Date(observation.created_at), 'd. MMMM yyyy, HH:mm', { locale: de })}
                       </span>
-                      {observation.tags.length > 0 && (
+                      {Array.isArray(observation.tags) && observation.tags.length > 0 && (
                         <div className="flex items-center space-x-1">
                           {observation.tags.map(tag => (
                             <span key={tag} className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">

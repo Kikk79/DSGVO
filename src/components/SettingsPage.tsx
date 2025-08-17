@@ -72,8 +72,12 @@ export const SettingsPage: React.FC = () => {
       try {
         await setDatabasePath(customPath);
         setShowPathDialog(false);
+        
+        // Show restart notification
+        alert('Datenbankpfad wurde erfolgreich geändert. Bitte starten Sie die Anwendung neu, damit die Änderung wirksam wird.');
       } catch (error) {
         console.error('Failed to change database path:', error);
+        alert('Fehler beim Ändern des Datenbankpfads: ' + error);
       }
     } else {
       setShowPathDialog(false);

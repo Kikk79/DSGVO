@@ -1,14 +1,13 @@
 {
   "permissions": {
     "allow": [
-
       "Bash(npm run tauri:build:*)",
       "Bash(git log:*)",
       "Bash(grep:*)",
       "Bash(rustup target list:*)",
       "Bash(npm run tauri build:*)",
-      "Bash(bash:*)"
-
+      "Bash(bash:*)",
+      "Bash(timeout 20 npm run tauri dev)"
     ],
     "deny": []
   }

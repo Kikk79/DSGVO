@@ -174,12 +174,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ loading: true, error: null });
     
     try {
-      const observation = await invoke('create_observation', {
+      const rawObservation = await invoke('create_observation', {
         studentId: data.student_id,
         category: data.category,
         text: data.text,
         tags: data.tags,
-      }) as Observation;
+      }) as any;
+      
+      // Transform observation to parse tags from JSON string to array
+      const observation: Observation = {
+        ...rawObservation,
+        tags: typeof rawObservation.tags === 'string' ? 
+          (rawObservation.tags.trim() ? JSON.parse(rawObservation.tags) : []) : 
+          (rawObservation.tags || [])
+      };
       
       const { observations } = get();
       set({ 
@@ -200,11 +208,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ loading: true, error: null });
     
     try {
-      const observations = await invoke('search_observations', {
+      const rawObservations = await invoke('search_observations', {
         query: query || null,
         studentId: student_id || null,
         category: category || null,
-      }) as Observation[];
+      }) as any[];
+      
+      // Transform observations to parse tags from JSON string to array
+      const observations: Observation[] = rawObservations.map(obs => ({
+        ...obs,
+        tags: typeof obs.tags === 'string' ? 
+          (obs.tags.trim() ? JSON.parse(obs.tags) : []) : 
+          (obs.tags || [])
+      }));
       
       set({ observations, loading: false, error: null });
     } catch (err) {
@@ -322,7 +338,21 @@ export const useAppStore = create<AppState>((set, get) => ({
   getObservation: async (observation_id: number): Promise<Observation | null> => {
     set({ loading: true, error: null });
     try {
-      const observation = await invoke('get_observation', { observationId: observation_id }) as Observation | null;
+      const rawObservation = await invoke('get_observation', { observationId: observation_id }) as any | null;
+      
+      if (!rawObservation) {
+        set({ loading: false, error: null });
+        return null;
+      }
+      
+      // Transform observation to parse tags from JSON string to array
+      const observation: Observation = {
+        ...rawObservation,
+        tags: typeof rawObservation.tags === 'string' ? 
+          (rawObservation.tags.trim() ? JSON.parse(rawObservation.tags) : []) : 
+          (rawObservation.tags || [])
+      };
+      
       set({ loading: false, error: null });
       return observation;
     } catch (err) {
