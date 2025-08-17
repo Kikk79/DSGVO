@@ -16,13 +16,15 @@ import {
 import { useAppStore } from '../stores/appStore';
 
 export const SettingsPage: React.FC = () => {
-  const { deviceConfig, setDeviceConfig, loading } = useAppStore();
+  const { deviceConfig, setDeviceConfig, loading, databasePath, getDatabasePath, setDatabasePath } = useAppStore();
   const [notifications, setNotifications] = useState(true);
   const [autoBackup, setAutoBackup] = useState(true);
   const [dataRetention, setDataRetention] = useState('365');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [localDeviceType, setLocalDeviceType] = useState<'computer' | 'notebook'>('computer');
   const [localDeviceName, setLocalDeviceName] = useState('');
+  const [showPathDialog, setShowPathDialog] = useState(false);
+  const [customPath, setCustomPath] = useState('');
 
   // Initialize local state from device config
   useEffect(() => {
@@ -31,6 +33,11 @@ export const SettingsPage: React.FC = () => {
       setLocalDeviceName(deviceConfig.device_name || '');
     }
   }, [deviceConfig]);
+
+  // Initialize database path
+  useEffect(() => {
+    getDatabasePath();
+  }, [getDatabasePath]);
 
   const handleDataExport = () => {
     // Implementation would trigger full data export
@@ -53,6 +60,24 @@ export const SettingsPage: React.FC = () => {
     // Implementation would trigger data deletion
     console.log('Deleting expired data...');
     setShowDeleteConfirm(false);
+  };
+
+  const handlePathChange = () => {
+    setCustomPath(databasePath || '');
+    setShowPathDialog(true);
+  };
+
+  const confirmPathChange = async () => {
+    if (customPath && customPath !== databasePath) {
+      try {
+        await setDatabasePath(customPath);
+        setShowPathDialog(false);
+      } catch (error) {
+        console.error('Failed to change database path:', error);
+      }
+    } else {
+      setShowPathDialog(false);
+    }
   };
 
   return (
@@ -215,15 +240,19 @@ export const SettingsPage: React.FC = () => {
               <input
                 type="text"
                 readOnly
-                value="%APPDATA%/schuelerbeobachtung/observations.db"
+                value={databasePath || 'Wird geladen...'}
                 className="input-field flex-1 bg-gray-50"
               />
-              <button className="btn-secondary">
+              <button 
+                onClick={handlePathChange}
+                className="btn-secondary"
+                disabled={loading}
+              >
                 Ändern
               </button>
             </div>
             <p className="text-sm text-gray-500 mt-1">
-              Sichere Lage außerhalb des Benutzerverzeichnisses
+              Sichere Lage außerhalb des Benutzerverzeichnisses. Hinweis: Ein Neustart der Anwendung ist nach der Änderung erforderlich.
             </p>
           </div>
         </div>
@@ -408,6 +437,69 @@ export const SettingsPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Path Change Dialog */}
+      {showPathDialog && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+            <div className="flex items-center mb-4">
+              <Database className="h-6 w-6 text-blue-600 mr-3" aria-hidden="true" />
+              <h3 className="text-lg font-medium text-gray-900">
+                Datenbankpfad ändern
+              </h3>
+            </div>
+            
+            <div className="mb-4">
+              <label htmlFor="custom-path" className="block text-sm font-medium text-gray-700 mb-2">
+                Neuer Datenbankpfad
+              </label>
+              <input
+                type="text"
+                id="custom-path"
+                value={customPath}
+                onChange={(e) => setCustomPath(e.target.value)}
+                placeholder="z.B. C:\Daten\schuelerbeobachtung\observations.db"
+                className="input-field w-full"
+              />
+              <p className="text-sm text-gray-500 mt-1">
+                Geben Sie den vollständigen Pfad zur neuen Datenbankdatei an. Das Verzeichnis muss existieren.
+              </p>
+            </div>
+            
+            <div className="bg-amber-50 border border-amber-200 rounded-md p-4 mb-6">
+              <div className="flex">
+                <AlertTriangle className="h-5 w-5 text-amber-400 mt-0.5 mr-3" aria-hidden="true" />
+                <div>
+                  <h4 className="text-sm font-medium text-amber-800">
+                    Wichtiger Hinweis
+                  </h4>
+                  <p className="text-sm text-amber-700 mt-1">
+                    Nach der Pfadänderung muss die Anwendung neu gestartet werden. 
+                    Die aktuelle Datenbank wird nicht automatisch verschoben.
+                  </p>
+                </div>
+              </div>
+            </div>
+            
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => setShowPathDialog(false)}
+                className="btn-secondary"
+                disabled={loading}
+              >
+                Abbrechen
+              </button>
+              <button
+                onClick={confirmPathChange}
+                className="btn-primary"
+                disabled={loading || !customPath.trim()}
+              >
+                {loading ? 'Speichert...' : 'Pfad ändern'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Confirmation Modal */}
       {showDeleteConfirm && (

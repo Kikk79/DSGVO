@@ -56,6 +56,7 @@ interface AppState {
   syncStatus: SyncStatus | null;
   deviceConfig: DeviceConfig | null;
   currentPin: ActivePin | null;
+  databasePath: string | null;
   
   // Actions
   initializeApp: () => Promise<void>;
@@ -110,6 +111,11 @@ interface AppState {
   getCurrentPairingPin: () => Promise<void>;
   clearPairingPin: () => Promise<void>;
   getPairingCode: () => Promise<string>;
+  
+  // Database Path Management
+  getDatabasePath: () => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  setDatabasePath: (newPath: string) => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -122,10 +128,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   syncStatus: null,
   deviceConfig: null,
   currentPin: null,
+  databasePath: null,
 
   // Actions
   initializeApp: async () => {
-    const { loadStudents, loadClasses, getSyncStatus, getDeviceConfig } = get();
+    const { loadStudents, loadClasses, getSyncStatus, getDeviceConfig, getDatabasePath } = get();
     set({ loading: true, error: null });
     
     try {
@@ -134,6 +141,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         loadClasses(),
         getSyncStatus(),
         getDeviceConfig(),
+        getDatabasePath(),
       ]);
     } catch (error) {
       set({ error: `Initialization failed: ${error}` });
@@ -508,6 +516,34 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       set({ 
         error: `Failed to get pairing code: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  // Database Path Management implementations
+  getDatabasePath: async () => {
+    try {
+      const databasePath = await invoke('get_database_path') as string;
+      set({ databasePath, error: null });
+    } catch (error) {
+      set({ error: `Failed to get database path: ${error}` });
+    }
+  },
+
+  setDatabasePath: async (newPath: string) => {
+    set({ loading: true, error: null });
+    
+    try {
+      await invoke('set_database_path', { newPath });
+      
+      // Refresh database path after setting
+      await get().getDatabasePath();
+      set({ loading: false, error: null });
+    } catch (err) {
+      set({ 
+        error: `Failed to set database path: ${err}`,
         loading: false 
       });
       throw err;

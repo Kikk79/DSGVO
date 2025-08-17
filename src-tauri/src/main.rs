@@ -435,6 +435,63 @@ async fn get_observation(
     db.get_observation(observation_id).await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_database_path(app: tauri::AppHandle) -> Result<String, String> {
+    let app_data_dir = app.path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    
+    let default_path = app_data_dir.join("observations.db");
+    
+    // Check if custom path is stored in config
+    let config_path = app_data_dir.join("config.json");
+    if config_path.exists() {
+        if let Ok(config_data) = std::fs::read_to_string(&config_path) {
+            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&config_data) {
+                if let Some(custom_path) = config.get("database_path").and_then(|p| p.as_str()) {
+                    return Ok(custom_path.to_string());
+                }
+            }
+        }
+    }
+    
+    Ok(default_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn set_database_path(
+    app: tauri::AppHandle,
+    new_path: String,
+) -> Result<(), String> {
+    let app_data_dir = app.path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    
+    // Validate the new path
+    let path = std::path::Path::new(&new_path);
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            return Err("The specified directory does not exist".to_string());
+        }
+    } else {
+        return Err("Invalid path specified".to_string());
+    }
+    
+    // Store the custom path in config
+    let config_path = app_data_dir.join("config.json");
+    let config = serde_json::json!({
+        "database_path": new_path
+    });
+    
+    std::fs::create_dir_all(&app_data_dir)
+        .map_err(|e| format!("Failed to create config directory: {}", e))?;
+    
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap())
+        .map_err(|e| format!("Failed to save configuration: {}", e))?;
+    
+    Ok(())
+}
+
 fn main() {
     // A simple logger that prints to the console
     env_logger::init();
@@ -448,8 +505,26 @@ fn main() {
             // Initialize crypto manager (do not panic if secure storage is unavailable)
             let crypto = Arc::new(crypto::CryptoManager::new().expect("Failed to initialize CryptoManager"));
             
-            // Initialize database
-            let db_path = app_data_dir.join("observations.db");
+            // Initialize database - check for custom path
+            let config_path = app_data_dir.join("config.json");
+            let db_path = if config_path.exists() {
+                if let Ok(config_data) = std::fs::read_to_string(&config_path) {
+                    if let Ok(config) = serde_json::from_str::<serde_json::Value>(&config_data) {
+                        if let Some(custom_path) = config.get("database_path").and_then(|p| p.as_str()) {
+                            std::path::PathBuf::from(custom_path)
+                        } else {
+                            app_data_dir.join("observations.db")
+                        }
+                    } else {
+                        app_data_dir.join("observations.db")
+                    }
+                } else {
+                    app_data_dir.join("observations.db")
+                }
+            } else {
+                app_data_dir.join("observations.db")
+            };
+            
             let db = tauri::async_runtime::block_on(async {
                 database::Database::new(db_path, crypto.clone()).await
             }).unwrap();
@@ -501,7 +576,9 @@ fn main() {
             export_changeset,
             import_changeset,
             get_device_config,
-            set_device_config
+            set_device_config,
+            get_database_path,
+            set_database_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
