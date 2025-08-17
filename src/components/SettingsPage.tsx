@@ -6,6 +6,7 @@ import {
   Eye, 
   Trash2,
   Download,
+  Upload,
   AlertTriangle,
   Settings,
   Lock,
@@ -16,15 +17,30 @@ import {
 import { useAppStore } from '../stores/appStore';
 
 export const SettingsPage: React.FC = () => {
-  const { deviceConfig, setDeviceConfig, loading, databasePath, getDatabasePath, setDatabasePath } = useAppStore();
+  const { 
+    deviceConfig, 
+    setDeviceConfig, 
+    loading, 
+    databasePath, 
+    getDatabasePath, 
+    setDatabasePath,
+    exportStudentData,
+    exportChangeset,
+    importChangeset,
+    students,
+    classes,
+    observations
+  } = useAppStore();
   const [notifications, setNotifications] = useState(true);
   const [autoBackup, setAutoBackup] = useState(true);
-  const [dataRetention, setDataRetention] = useState('365');
+  const [dataRetention, setDataRetention] = useState('730');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [localDeviceType, setLocalDeviceType] = useState<'computer' | 'notebook'>('computer');
   const [localDeviceName, setLocalDeviceName] = useState('');
   const [showPathDialog, setShowPathDialog] = useState(false);
   const [customPath, setCustomPath] = useState('');
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
 
   // Initialize local state from device config
   useEffect(() => {
@@ -39,9 +55,117 @@ export const SettingsPage: React.FC = () => {
     getDatabasePath();
   }, [getDatabasePath]);
 
-  const handleDataExport = () => {
-    // Implementation would trigger full data export
-    console.log('Exporting all data...');
+  const handleDataExport = async () => {
+    try {
+      // Export all student data
+      const studentExports = [];
+      
+      for (const student of students) {
+        const data = await exportStudentData(student.id, 'json');
+        studentExports.push({
+          student: student,
+          data: JSON.parse(data)
+        });
+      }
+      
+      const exportData = {
+        timestamp: new Date().toISOString(),
+        students: students,
+        classes: classes,
+        observations: observations,
+        studentData: studentExports
+      };
+      
+      // Create and download file
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { 
+        type: 'application/json' 
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `dsgvo-export-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      alert('Datenexport erfolgreich erstellt und heruntergeladen.');
+    } catch (error) {
+      console.error('Export failed:', error);
+      alert('Fehler beim Datenexport: ' + error);
+    }
+  };
+
+  const handleDataImport = () => {
+    setShowImportDialog(true);
+  };
+
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setImportFile(file);
+    }
+  };
+
+  const confirmDataImport = async () => {
+    if (!importFile) return;
+
+    try {
+      const fileContent = await importFile.text();
+      
+      // Check if it's a changeset or full export
+      let data;
+      try {
+        data = JSON.parse(fileContent);
+      } catch (error) {
+        // Assume it's base64 encoded changeset
+        await importChangeset(fileContent);
+        setShowImportDialog(false);
+        setImportFile(null);
+        alert('Changeset erfolgreich importiert.');
+        return;
+      }
+
+      // If it's a JSON export, we need to convert it to changeset format
+      // For now, we'll handle it as a changeset
+      if (data.timestamp && data.students) {
+        // This is a full export - we could implement conversion logic here
+        alert('Vollständiger Datenimport wird derzeit nicht unterstützt. Bitte verwenden Sie Changeset-Dateien.');
+      } else {
+        // Assume it's already a changeset
+        await importChangeset(fileContent);
+        setShowImportDialog(false);
+        setImportFile(null);
+        alert('Daten erfolgreich importiert.');
+      }
+    } catch (error) {
+      console.error('Import failed:', error);
+      alert('Fehler beim Datenimport: ' + error);
+    }
+  };
+
+  const handleChangesetExport = async () => {
+    try {
+      const changeset = await exportChangeset();
+      
+      // Create and download changeset file
+      const blob = new Blob([changeset], { 
+        type: 'application/octet-stream' 
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `changeset-${new Date().toISOString().split('T')[0]}.dat`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      alert('Changeset erfolgreich exportiert.');
+    } catch (error) {
+      console.error('Changeset export failed:', error);
+      alert('Fehler beim Changeset-Export: ' + error);
+    }
   };
 
   const handleDeviceConfigSave = async () => {
@@ -172,6 +296,60 @@ export const SettingsPage: React.FC = () => {
                 <Shield className="h-4 w-4 mr-2" aria-hidden="true" />
                 Datenübertragbarkeit (Art. 20 DSGVO)
               </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Data Transfer & Sync */}
+      <div className="card">
+        <div className="card-header">
+          <h2 className="text-lg font-medium text-gray-900 flex items-center">
+            <FileText className="h-5 w-5 mr-2" aria-hidden="true" />
+            Datentransfer & Synchronisation
+          </h2>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-sm font-medium text-gray-900 mb-3">
+              Changeset-Verwaltung
+            </h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Exportieren und importieren Sie Datenänderungen für die Synchronisation zwischen Geräten.
+            </p>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <button 
+                className="btn-secondary flex items-center justify-center"
+                onClick={handleChangesetExport}
+              >
+                <Download className="h-4 w-4 mr-2" aria-hidden="true" />
+                Changeset exportieren
+              </button>
+              
+              <button 
+                className="btn-secondary flex items-center justify-center"
+                onClick={() => setShowImportDialog(true)}
+              >
+                <Upload className="h-4 w-4 mr-2" aria-hidden="true" />
+                Changeset importieren
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+            <div className="flex">
+              <Database className="h-5 w-5 text-blue-400 mt-0.5 mr-3" aria-hidden="true" />
+              <div>
+                <h4 className="text-sm font-medium text-blue-800">
+                  Changeset-Information
+                </h4>
+                <p className="text-sm text-blue-700 mt-1">
+                  Changesets enthalten nur die Änderungen seit dem letzten Export und sind 
+                  ideal für die sichere Synchronisation zwischen Geräten.
+                </p>
+              </div>
             </div>
           </div>
         </div>
@@ -533,6 +711,83 @@ export const SettingsPage: React.FC = () => {
                 className="btn-danger"
               >
                 Endgültig löschen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Import Dialog */}
+      {showImportDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-medium text-gray-900 mb-4">
+              Daten importieren
+            </h3>
+            
+            <div className="mb-4">
+              <label htmlFor="import-file" className="block text-sm font-medium text-gray-700 mb-2">
+                Datei auswählen
+              </label>
+              <input
+                type="file"
+                id="import-file"
+                accept=".json,.dat"
+                onChange={handleFileSelect}
+                className="block w-full text-sm text-gray-500
+                  file:mr-4 file:py-2 file:px-4
+                  file:rounded-full file:border-0
+                  file:text-sm file:font-semibold
+                  file:bg-blue-50 file:text-blue-700
+                  hover:file:bg-blue-100"
+              />
+              <p className="text-sm text-gray-500 mt-1">
+                Unterstützte Formate: JSON-Export, Changeset-Dateien (.dat)
+              </p>
+            </div>
+
+            {importFile && (
+              <div className="mb-4 p-3 bg-gray-50 rounded-md">
+                <p className="text-sm font-medium text-gray-900">
+                  Ausgewählte Datei:
+                </p>
+                <p className="text-sm text-gray-600">
+                  {importFile.name} ({Math.round(importFile.size / 1024)} KB)
+                </p>
+              </div>
+            )}
+
+            <div className="bg-yellow-50 border border-yellow-200 rounded-md p-4 mb-4">
+              <div className="flex">
+                <AlertTriangle className="h-5 w-5 text-yellow-400 mt-0.5 mr-3" aria-hidden="true" />
+                <div>
+                  <h4 className="text-sm font-medium text-yellow-800">
+                    Wichtiger Hinweis
+                  </h4>
+                  <p className="text-sm text-yellow-700 mt-1">
+                    Der Import überschreibt möglicherweise vorhandene Daten. 
+                    Erstellen Sie vorher eine Sicherung.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => {
+                  setShowImportDialog(false);
+                  setImportFile(null);
+                }}
+                className="btn-secondary"
+              >
+                Abbrechen
+              </button>
+              <button
+                onClick={confirmDataImport}
+                disabled={!importFile}
+                className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Importieren
               </button>
             </div>
           </div>

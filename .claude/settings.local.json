@@ -7,7 +7,8 @@
       "Bash(rustup target list:*)",
       "Bash(npm run tauri build:*)",
       "Bash(bash:*)",
-      "Bash(timeout 20 npm run tauri dev)"
+      "Bash(timeout 20 npm run tauri dev)",
+      "Bash(npm test:*)"
     ],
     "deny": []
   }
