@@ -125,8 +125,8 @@ beforeAll(() => {
     }
   });
 
-  window.__TAURI__.invoke = mockInvoke;
-  window.__TAURI__.core.invoke = mockInvoke;
+  (window as any).__TAURI__.invoke = mockInvoke;
+  (window as any).__TAURI__.core.invoke = mockInvoke;
 });
 
 // Clean up after each test case

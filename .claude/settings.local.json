@@ -8,7 +8,8 @@
       "Bash(npm run tauri build:*)",
       "Bash(bash:*)",
       "Bash(timeout 20 npm run tauri dev)",
-      "Bash(npm test:*)"
+      "Bash(npm test:*)",
+      "Bash(npm run build:*)"
     ],
     "deny": []
   }

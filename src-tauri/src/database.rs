@@ -377,8 +377,7 @@ impl Database {
 
         let mut observations = Vec::new();
         for row in rows {
-            // Encryption disabled - text stored as plaintext
-            let text: String = row.get("text");
+            let text = self.extract_text_from_row(&row);
             
             let tags_json: String = row.get("tags");
             let _tags_vec: Vec<String> = serde_json::from_str(&tags_json)?;
@@ -558,8 +557,26 @@ impl Database {
 
         match row {
             Some(row) => {
-                // Encryption disabled - text stored as plaintext
-                let text: String = row.get("text");
+                // Handle text field - it could be BLOB (encrypted) or TEXT (plaintext)
+                let text = match row.try_get::<Vec<u8>, _>("text") {
+                    Ok(blob_data) => {
+                        // It's a BLOB (encrypted), try to decrypt
+                        match self.crypto.decrypt(&blob_data) {
+                            Ok(decrypted_bytes) => String::from_utf8(decrypted_bytes)
+                                .unwrap_or_else(|_| "Failed to decode text".to_string()),
+                            Err(_) => {
+                                // If decryption fails, try to treat as raw string
+                                String::from_utf8(blob_data)
+                                    .unwrap_or_else(|_| "Invalid text data".to_string())
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        // It's not a BLOB, try to get as string (plaintext)
+                        row.try_get::<String, _>("text")
+                            .unwrap_or_else(|_| "Failed to read text".to_string())
+                    }
+                };
                 
                 let tags_json: String = row.get("tags");
                 let _tags_vec: Vec<String> = serde_json::from_str(&tags_json)?;
@@ -609,16 +626,74 @@ impl Database {
         .await?;
         changeset["changes"]["classes"] = serde_json::to_value(classes)?;
 
-        // Get recent observations (within last 30 days)
-        let observations = sqlx::query_as::<_, Observation>(
-            "SELECT * FROM observations WHERE updated_at > datetime('now', '-30 days')"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        // Get recent observations (within last 30 days) - handle both encrypted and plaintext
+        let observations = self.get_observations_for_export().await?;
         changeset["changes"]["observations"] = serde_json::to_value(observations)?;
 
         let changeset_str = serde_json::to_string(&changeset)?;
         Ok(changeset_str.into_bytes())
+    }
+
+    /// Helper function to safely extract text from database row, handling both encrypted (BLOB) and plaintext (TEXT) formats
+    fn extract_text_from_row(&self, row: &sqlx::sqlite::SqliteRow) -> String {
+        match row.try_get::<Vec<u8>, _>("text") {
+            Ok(blob_data) => {
+                // It's a BLOB (encrypted), try to decrypt
+                match self.crypto.decrypt(&blob_data) {
+                    Ok(decrypted_bytes) => String::from_utf8(decrypted_bytes)
+                        .unwrap_or_else(|_| "Failed to decode text".to_string()),
+                    Err(_) => {
+                        // If decryption fails, try to treat as raw string
+                        String::from_utf8(blob_data)
+                            .unwrap_or_else(|_| "Invalid text data".to_string())
+                    }
+                }
+            },
+            Err(_) => {
+                // It's not a BLOB, try to get as string (plaintext)
+                row.try_get::<String, _>("text")
+                    .unwrap_or_else(|_| "Failed to read text".to_string())
+            }
+        }
+    }
+
+    async fn get_observations_for_export(&self) -> Result<Vec<Observation>> {
+        // Try to detect if the database uses encrypted or plaintext storage
+        let rows = sqlx::query(
+            "SELECT id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id 
+             FROM observations WHERE updated_at > datetime('now', '-30 days')"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut observations = Vec::new();
+        
+        for row in rows {
+            let id: i64 = row.get("id");
+            let student_id: i64 = row.get("student_id");
+            let author_id: i64 = row.get("author_id");
+            let category: String = row.get("category");
+            let tags: String = row.get("tags");
+            let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+            let updated_at: chrono::DateTime<chrono::Utc> = row.get("updated_at");
+            let source_device_id: String = row.get("source_device_id");
+            
+            let text = self.extract_text_from_row(&row);
+
+            observations.push(Observation {
+                id,
+                student_id,
+                author_id,
+                category,
+                text,
+                tags,
+                created_at,
+                updated_at,
+                source_device_id,
+            });
+        }
+
+        Ok(observations)
     }
 
     pub async fn apply_changeset(&self, changeset: &[u8], _peer_id: &str) -> Result<()> {
@@ -677,15 +752,22 @@ impl Database {
         // Apply observation changes
         if let Some(observations) = changes["observations"].as_array() {
             for obs_data in observations {
-                let observation: Observation = serde_json::from_value(obs_data.clone())?;
+                let mut observation: Observation = serde_json::from_value(obs_data.clone())?;
+                
+                // Ensure author_id is set (fallback to 1 if missing)
+                if observation.author_id == 0 {
+                    observation.author_id = 1;
+                }
+                
                 // Encrypt the text before storing
                 let encrypted_text = self.crypto.encrypt(observation.text.as_bytes())?;
                 sqlx::query(
-                    "INSERT OR REPLACE INTO observations (id, student_id, category, text, tags, created_at, updated_at, source_device_id) 
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    "INSERT OR REPLACE INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(observation.id)
                 .bind(observation.student_id)
+                .bind(observation.author_id)
                 .bind(&observation.category)
                 .bind(&encrypted_text)
                 .bind(&observation.tags)

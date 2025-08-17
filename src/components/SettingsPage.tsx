@@ -96,9 +96,6 @@ export const SettingsPage: React.FC = () => {
     }
   };
 
-  const handleDataImport = () => {
-    setShowImportDialog(true);
-  };
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
