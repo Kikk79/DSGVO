@@ -1,10 +1,11 @@
-use sqlx::{Pool, Sqlite, Row, sqlite::SqlitePoolOptions};
-use anyhow::{Result, Context};
+use crate::crypto::CryptoManager;
+use crate::{Class, Observation, Student};
+use anyhow::{Context, Result};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
+use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 use std::path::Path;
 use std::sync::Arc;
-use crate::crypto::CryptoManager;
-use crate::{Student, Class, Observation};
 
 pub struct Database {
     pool: Pool<Sqlite>,
@@ -15,12 +16,13 @@ impl Database {
     pub async fn new<P: AsRef<Path>>(db_path: P, crypto: Arc<CryptoManager>) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.as_ref().parent() {
-            tokio::fs::create_dir_all(parent).await
+            tokio::fs::create_dir_all(parent)
+                .await
                 .context("Failed to create database directory")?;
         }
 
         let db_url = format!("sqlite:{}?mode=rwc", db_path.as_ref().display());
-        
+
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect(&db_url)
@@ -31,10 +33,8 @@ impl Database {
         sqlx::query("PRAGMA journal_mode=WAL")
             .execute(&pool)
             .await?;
-        
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await?;
+
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
 
         let db = Self { pool, crypto };
         db.migrate().await?;
@@ -44,7 +44,7 @@ impl Database {
     async fn migrate(&self) -> Result<()> {
         // Check if we're migrating from encrypted schema to plaintext
         let needs_migration = self.check_schema_migration_needed().await?;
-        
+
         if needs_migration {
             println!("Migrating database schema from encrypted to plaintext format...");
             self.migrate_encrypted_to_plaintext().await?;
@@ -135,13 +135,17 @@ impl Database {
         .await?;
 
         // Create indexes for better performance
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_observations_student ON observations(student_id)")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_observations_student ON observations(student_id)",
+        )
+        .execute(&self.pool)
+        .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_observations_created ON observations(created_at)")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_observations_created ON observations(created_at)",
+        )
+        .execute(&self.pool)
+        .await?;
 
         // Migrate existing tables to add source_device_id columns if they don't exist
         self.add_missing_columns().await?;
@@ -151,10 +155,10 @@ impl Database {
 
     async fn add_missing_columns(&self) -> Result<()> {
         let device_id = self.crypto.get_device_id();
-        
+
         // Check and add source_device_id to classes table
         let classes_has_column = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('classes') WHERE name = 'source_device_id'"
+            "SELECT COUNT(*) FROM pragma_table_info('classes') WHERE name = 'source_device_id'",
         )
         .fetch_one(&self.pool)
         .await
@@ -165,7 +169,7 @@ impl Database {
             sqlx::query("ALTER TABLE classes ADD COLUMN source_device_id TEXT NOT NULL DEFAULT ''")
                 .execute(&self.pool)
                 .await?;
-            
+
             // Update existing records with current device ID
             sqlx::query("UPDATE classes SET source_device_id = ? WHERE source_device_id = ''")
                 .bind(&device_id)
@@ -175,7 +179,7 @@ impl Database {
 
         // Check and add source_device_id to students table
         let students_has_column = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('students') WHERE name = 'source_device_id'"
+            "SELECT COUNT(*) FROM pragma_table_info('students') WHERE name = 'source_device_id'",
         )
         .fetch_one(&self.pool)
         .await
@@ -183,10 +187,12 @@ impl Database {
 
         if students_has_column == 0 {
             println!("Adding source_device_id column to students table...");
-            sqlx::query("ALTER TABLE students ADD COLUMN source_device_id TEXT NOT NULL DEFAULT ''")
-                .execute(&self.pool)
-                .await?;
-            
+            sqlx::query(
+                "ALTER TABLE students ADD COLUMN source_device_id TEXT NOT NULL DEFAULT ''",
+            )
+            .execute(&self.pool)
+            .await?;
+
             // Update existing records with current device ID
             sqlx::query("UPDATE students SET source_device_id = ? WHERE source_device_id = ''")
                 .bind(&device_id)
@@ -240,7 +246,7 @@ impl Database {
     pub async fn create_class(&self, name: String, school_year: String) -> Result<Class> {
         let device_id = self.crypto.get_device_id();
         let now = chrono::Utc::now();
-        
+
         let id = sqlx::query(
             r#"
             INSERT INTO classes (name, school_year, created_at, updated_at, source_device_id)
@@ -256,9 +262,9 @@ impl Database {
         .await?
         .last_insert_rowid();
 
-        Ok(Class { 
-            id, 
-            name, 
+        Ok(Class {
+            id,
+            name,
             school_year,
             created_at: now,
             updated_at: now,
@@ -266,11 +272,17 @@ impl Database {
         })
     }
 
-    pub async fn create_student(&self, class_id: i64, first_name: String, last_name: String, status: Option<String>) -> Result<Student> {
+    pub async fn create_student(
+        &self,
+        class_id: i64,
+        first_name: String,
+        last_name: String,
+        status: Option<String>,
+    ) -> Result<Student> {
         let status = status.unwrap_or_else(|| "active".to_string());
         let device_id = self.crypto.get_device_id();
         let now = chrono::Utc::now();
-        
+
         let id = sqlx::query(
             r#"
             INSERT INTO students (class_id, first_name, last_name, status, created_at, updated_at, source_device_id)
@@ -288,11 +300,11 @@ impl Database {
         .await?
         .last_insert_rowid();
 
-        Ok(Student { 
-            id, 
-            class_id, 
-            first_name, 
-            last_name, 
+        Ok(Student {
+            id,
+            class_id,
+            first_name,
+            last_name,
             status,
             created_at: now,
             updated_at: now,
@@ -365,11 +377,11 @@ impl Database {
 
         sql.push_str(" ORDER BY created_at DESC");
 
-            let mut sql_query = sqlx::query(&sql);
+        let mut sql_query = sqlx::query(&sql);
         for value in bind_values {
             sql_query = sql_query.bind(value);
         }
-        
+
         let rows = sql_query.fetch_all(&self.pool).await?;
 
         // Precompute lowercase query once to avoid moving inside the loop
@@ -378,7 +390,7 @@ impl Database {
         let mut observations = Vec::new();
         for row in rows {
             let text = self.extract_text_from_row(&row);
-            
+
             let tags_json: String = row.get("tags");
             let _tags_vec: Vec<String> = serde_json::from_str(&tags_json)?;
 
@@ -405,14 +417,41 @@ impl Database {
         Ok(observations)
     }
 
+    pub async fn get_observations_since(&self, since: chrono::DateTime<chrono::Utc>) -> Result<Vec<Observation>> {
+        let sql = "SELECT id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id FROM observations WHERE created_at >= ? ORDER BY created_at DESC";
+        let rows = sqlx::query(sql)
+            .bind(since.to_rfc3339())
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut observations = Vec::new();
+        for row in rows {
+            let text = self.extract_text_from_row(&row);
+            let tags_json: String = row.get("tags");
+
+            observations.push(Observation {
+                id: row.get("id"),
+                student_id: row.get("student_id"),
+                author_id: row.get("author_id"),
+                category: row.get("category"),
+                text,
+                tags: tags_json,
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                source_device_id: row.get("source_device_id"),
+            });
+        }
+
+        Ok(observations)
+    }
+
     pub async fn delete_student(&self, student_id: i64, force_delete: bool) -> Result<()> {
         // GDPR compliance: Check if student has observations
-        let observation_count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM observations WHERE student_id = ?"
-        )
-        .bind(student_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let observation_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM observations WHERE student_id = ?")
+                .bind(student_id)
+                .fetch_one(&self.pool)
+                .await?;
 
         if observation_count > 0 && !force_delete {
             // Soft delete: mark student as inactive (GDPR-compliant archiving)
@@ -428,12 +467,12 @@ impl Database {
                 .bind(student_id)
                 .execute(&self.pool)
                 .await?;
-            
+
             sqlx::query("DELETE FROM observations WHERE student_id = ?")
                 .bind(student_id)
                 .execute(&self.pool)
                 .await?;
-            
+
             sqlx::query("DELETE FROM students WHERE id = ?")
                 .bind(student_id)
                 .execute(&self.pool)
@@ -452,7 +491,7 @@ impl Database {
     pub async fn delete_class(&self, class_id: i64, force_delete: bool) -> Result<()> {
         // Check if class has students
         let student_count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM students WHERE class_id = ? AND status = 'active'"
+            "SELECT COUNT(*) FROM students WHERE class_id = ? AND status = 'active'",
         )
         .bind(class_id)
         .fetch_one(&self.pool)
@@ -467,12 +506,11 @@ impl Database {
 
         if force_delete {
             // Get all students in this class
-            let student_ids: Vec<i64> = sqlx::query_scalar(
-                "SELECT id FROM students WHERE class_id = ?"
-            )
-            .bind(class_id)
-            .fetch_all(&self.pool)
-            .await?;
+            let student_ids: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM students WHERE class_id = ?")
+                    .bind(class_id)
+                    .fetch_all(&self.pool)
+                    .await?;
 
             // Delete all students and their data
             for student_id in student_ids {
@@ -489,18 +527,27 @@ impl Database {
         Ok(())
     }
 
-    pub async fn delete_observation(&self, observation_id: i64, author_id: i64, force_delete: bool) -> Result<()> {
+    pub async fn delete_observation(
+        &self,
+        observation_id: i64,
+        author_id: i64,
+        force_delete: bool,
+    ) -> Result<()> {
         // First verify the observation exists and get its details
-        let observation = sqlx::query(
-            "SELECT id, student_id, author_id FROM observations WHERE id = ?"
-        )
-        .bind(observation_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let observation =
+            sqlx::query("SELECT id, student_id, author_id FROM observations WHERE id = ?")
+                .bind(observation_id)
+                .fetch_optional(&self.pool)
+                .await?;
 
         let observation_row = match observation {
             Some(row) => row,
-            None => return Err(anyhow::anyhow!("Observation with ID {} not found", observation_id)),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Observation with ID {} not found",
+                    observation_id
+                ))
+            }
         };
 
         let stored_author_id: i64 = observation_row.get("author_id");
@@ -516,7 +563,7 @@ impl Database {
 
         // Check if there are attachments
         let attachment_count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM attachments WHERE observation_id = ?"
+            "SELECT COUNT(*) FROM attachments WHERE observation_id = ?",
         )
         .bind(observation_id)
         .fetch_one(&self.pool)
@@ -539,7 +586,7 @@ impl Database {
 
         if rows_affected == 0 {
             return Err(anyhow::anyhow!(
-                "Failed to delete observation {}. It may have been already deleted.", 
+                "Failed to delete observation {}. It may have been already deleted.",
                 observation_id
             ));
         }
@@ -570,14 +617,14 @@ impl Database {
                                     .unwrap_or_else(|_| "Invalid text data".to_string())
                             }
                         }
-                    },
+                    }
                     Err(_) => {
                         // It's not a BLOB, try to get as string (plaintext)
                         row.try_get::<String, _>("text")
                             .unwrap_or_else(|_| "Failed to read text".to_string())
                     }
                 };
-                
+
                 let tags_json: String = row.get("tags");
                 let _tags_vec: Vec<String> = serde_json::from_str(&tags_json)?;
 
@@ -612,7 +659,7 @@ impl Database {
 
         // Get recent students (within last 30 days)
         let students = sqlx::query_as::<_, Student>(
-            "SELECT * FROM students WHERE updated_at > datetime('now', '-30 days')"
+            "SELECT * FROM students WHERE updated_at > datetime('now', '-30 days')",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -620,7 +667,7 @@ impl Database {
 
         // Get recent classes (within last 30 days)
         let classes = sqlx::query_as::<_, Class>(
-            "SELECT * FROM classes WHERE updated_at > datetime('now', '-30 days')"
+            "SELECT * FROM classes WHERE updated_at > datetime('now', '-30 days')",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -648,7 +695,7 @@ impl Database {
                             .unwrap_or_else(|_| "Invalid text data".to_string())
                     }
                 }
-            },
+            }
             Err(_) => {
                 // It's not a BLOB, try to get as string (plaintext)
                 row.try_get::<String, _>("text")
@@ -667,7 +714,7 @@ impl Database {
         .await?;
 
         let mut observations = Vec::new();
-        
+
         for row in rows {
             let id: i64 = row.get("id");
             let student_id: i64 = row.get("student_id");
@@ -677,7 +724,7 @@ impl Database {
             let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
             let updated_at: chrono::DateTime<chrono::Utc> = row.get("updated_at");
             let source_device_id: String = row.get("source_device_id");
-            
+
             let text = self.extract_text_from_row(&row);
 
             observations.push(Observation {
@@ -753,12 +800,12 @@ impl Database {
         if let Some(observations) = changes["observations"].as_array() {
             for obs_data in observations {
                 let mut observation: Observation = serde_json::from_value(obs_data.clone())?;
-                
+
                 // Ensure author_id is set (fallback to 1 if missing)
                 if observation.author_id == 0 {
                     observation.author_id = 1;
                 }
-                
+
                 // Encrypt the text before storing
                 let encrypted_text = self.crypto.encrypt(observation.text.as_bytes())?;
                 sqlx::query(
@@ -779,10 +826,14 @@ impl Database {
             }
         }
 
-        tracing::info!("Successfully applied changeset with {} students, {} classes, {} observations",
+        tracing::info!(
+            "Successfully applied changeset with {} students, {} classes, {} observations",
             changes["students"].as_array().map(|a| a.len()).unwrap_or(0),
             changes["classes"].as_array().map(|a| a.len()).unwrap_or(0),
-            changes["observations"].as_array().map(|a| a.len()).unwrap_or(0)
+            changes["observations"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0)
         );
 
         Ok(())
@@ -791,7 +842,7 @@ impl Database {
     async fn check_schema_migration_needed(&self) -> Result<bool> {
         // Check if observations table exists with old encrypted schema
         let has_text_encrypted = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('observations') WHERE name = 'text_encrypted'"
+            "SELECT COUNT(*) FROM pragma_table_info('observations') WHERE name = 'text_encrypted'",
         )
         .fetch_one(&self.pool)
         .await
@@ -802,11 +853,9 @@ impl Database {
 
     async fn migrate_encrypted_to_plaintext(&self) -> Result<()> {
         // Create backup table for safety
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS observations_backup AS SELECT * FROM observations"
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS observations_backup AS SELECT * FROM observations")
+            .execute(&self.pool)
+            .await?;
 
         // Create new table with plaintext schema
         sqlx::query(
@@ -836,11 +885,14 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
 
-        println!("Migrating {} observations from encrypted to plaintext format", rows.len());
+        println!(
+            "Migrating {} observations from encrypted to plaintext format",
+            rows.len()
+        );
 
         for row in rows {
             let text_encrypted: Vec<u8> = row.get("text_encrypted");
-            
+
             // Attempt to decrypt or use as-is (since encryption is disabled)
             let text = match String::from_utf8(text_encrypted) {
                 Ok(plaintext) => plaintext,
@@ -878,5 +930,362 @@ impl Database {
 
         println!("Schema migration completed successfully");
         Ok(())
+    }
+
+    /// Create a complete changeset file with metadata and checksums
+    pub async fn create_changeset_file(&self, days_back: u32) -> Result<Vec<u8>> {
+        // Get device ID for metadata
+        let device_id = self.crypto.get_device_id();
+
+        // Generate changeset ID
+        let changeset_id = uuid::Uuid::new_v4().to_string();
+
+        // Get data from the specified time period
+        let cutoff_date = chrono::Utc::now() - chrono::Duration::days(days_back as i64);
+        let cutoff_str = cutoff_date.format("%Y-%m-%d %H:%M:%S%.f").to_string();
+
+        // Get students
+        let students =
+            sqlx::query_as::<_, crate::Student>("SELECT * FROM students WHERE updated_at > ?")
+                .bind(&cutoff_str)
+                .fetch_all(&self.pool)
+                .await?;
+
+        // Get classes
+        let classes =
+            sqlx::query_as::<_, crate::Class>("SELECT * FROM classes WHERE updated_at > ?")
+                .bind(&cutoff_str)
+                .fetch_all(&self.pool)
+                .await?;
+
+        // Get observations
+        let observations = self.get_observations_for_export_since(&cutoff_str).await?;
+
+        // Create changeset structure
+        let changeset = serde_json::json!({
+            "version": "2.0",
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "device_id": device_id,
+            "changeset_id": changeset_id,
+            "time_range": {
+                "from": cutoff_date.to_rfc3339(),
+                "to": chrono::Utc::now().to_rfc3339(),
+                "days_back": days_back
+            },
+            "data": {
+                "students": students,
+                "classes": classes,
+                "observations": observations
+            },
+            "metadata": {
+                "record_count": {
+                    "students": students.len(),
+                    "classes": classes.len(),
+                    "observations": observations.len(),
+                    "total": students.len() + classes.len() + observations.len()
+                }
+            }
+        });
+
+        // Serialize to JSON
+        let json_str = serde_json::to_string_pretty(&changeset)?;
+        let json_bytes = json_str.into_bytes();
+
+        // Calculate checksum
+        let mut hasher = Sha256::new();
+        hasher.update(&json_bytes);
+        let checksum = format!("{:x}", hasher.finalize());
+
+        // Create final structure with checksum
+        let final_changeset = serde_json::json!({
+            "changeset": changeset,
+            "checksum": checksum,
+            "format": "json",
+            "compression": "none"
+        });
+
+        let final_json = serde_json::to_string_pretty(&final_changeset)?;
+        Ok(final_json.into_bytes())
+    }
+
+    /// Get observations for export within a specific time range
+    async fn get_observations_for_export_since(
+        &self,
+        since_date: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query(
+            "SELECT id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id 
+             FROM observations WHERE updated_at > ? ORDER BY created_at"
+        )
+        .bind(since_date)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut observations = Vec::new();
+        for row in rows {
+            let text = self.extract_text_from_row(&row);
+
+            observations.push(serde_json::json!({
+                "id": row.get::<i64, _>("id"),
+                "student_id": row.get::<i64, _>("student_id"),
+                "author_id": row.get::<i64, _>("author_id"),
+                "category": row.get::<String, _>("category"),
+                "text": text,
+                "tags": row.get::<String, _>("tags"),
+                "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+                "updated_at": row.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
+                "source_device_id": row.get::<String, _>("source_device_id")
+            }));
+        }
+
+        Ok(observations)
+    }
+
+    /// Apply changeset from a complete file (with metadata and validation)
+    pub async fn apply_changeset_file(&self, file_data: &[u8]) -> Result<String> {
+        // Parse the file
+        let file_str = String::from_utf8(file_data.to_vec())?;
+        let file_data: serde_json::Value = serde_json::from_str(&file_str)?;
+
+        // Validate structure
+        if file_data["format"].as_str() != Some("json") {
+            return Err(anyhow::anyhow!("Unsupported changeset file format"));
+        }
+
+        // Verify checksum
+        let provided_checksum = file_data["checksum"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing checksum in changeset file"))?;
+
+        let changeset = &file_data["changeset"];
+        let changeset_str = serde_json::to_string_pretty(changeset)?;
+        let mut hasher = Sha256::new();
+        hasher.update(changeset_str.as_bytes());
+        let calculated_checksum = format!("{:x}", hasher.finalize());
+
+        if provided_checksum != calculated_checksum {
+            return Err(anyhow::anyhow!(
+                "Checksum verification failed - file may be corrupted"
+            ));
+        }
+
+        // Validate changeset version
+        if changeset["version"].as_str() != Some("2.0") {
+            return Err(anyhow::anyhow!("Unsupported changeset version"));
+        }
+
+        // Extract metadata for reporting
+        let source_device = changeset["device_id"].as_str().unwrap_or("unknown");
+        let created_at = changeset["created_at"].as_str().unwrap_or("unknown");
+        let record_counts = &changeset["metadata"]["record_count"];
+
+        // Apply the changeset (reuse existing logic)
+        let changeset_bytes = serde_json::to_string(changeset)?.into_bytes();
+        self.apply_changeset(&changeset_bytes, source_device)
+            .await?;
+
+        // Return summary
+        Ok(format!(
+            "Applied changeset from device '{}' created at {}. Records: {} students, {} classes, {} observations",
+            source_device,
+            created_at,
+            record_counts["students"].as_u64().unwrap_or(0),
+            record_counts["classes"].as_u64().unwrap_or(0),
+            record_counts["observations"].as_u64().unwrap_or(0)
+        ))
+    }
+
+    /// Import full JSON backup data
+    pub async fn import_full_backup(&self, backup_data: &[u8]) -> Result<String> {
+        // Parse the backup file
+        let backup_str = String::from_utf8(backup_data.to_vec())?;
+        let backup_data: serde_json::Value = serde_json::from_str(&backup_str)?;
+
+        // Validate structure
+        if backup_data["format"].as_str() != Some("full_export") {
+            return Err(anyhow::anyhow!("Invalid backup file format"));
+        }
+
+        // Extract metadata for reporting
+        let source_device_type = backup_data["source_device"]["device_type"].as_str().unwrap_or("unknown");
+        let source_device_name = backup_data["source_device"]["device_name"].as_str().unwrap_or("unnamed");
+        let timestamp = backup_data["timestamp"].as_str().unwrap_or("unknown");
+        let _export_scope = &backup_data["export_scope"];
+
+        // Extract data arrays
+        let students_data = backup_data["data"]["students"].as_array()
+            .ok_or_else(|| anyhow::anyhow!("Missing students data in backup"))?;
+        let classes_data = backup_data["data"]["classes"].as_array()
+            .ok_or_else(|| anyhow::anyhow!("Missing classes data in backup"))?;
+        let observations_data = backup_data["data"]["observations"].as_array()
+            .ok_or_else(|| anyhow::anyhow!("Missing observations data in backup"))?;
+
+        // Start transaction for atomic import
+        let mut transaction = self.pool.begin().await?;
+
+        // Counters for reporting
+        let mut imported_students = 0;
+        let mut imported_classes = 0;
+        let mut imported_observations = 0;
+        let mut updated_students = 0;
+        let mut updated_classes = 0;
+        let mut updated_observations = 0;
+
+        // Import classes first (students reference classes)
+        for class_data in classes_data {
+            let class_id = class_data["id"].as_i64()
+                .ok_or_else(|| anyhow::anyhow!("Invalid class ID in backup"))?;
+            let name = class_data["name"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing class name in backup"))?;
+            let school_year = class_data["school_year"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing school year in backup"))?;
+
+            // Check if class exists
+            let existing_class = sqlx::query("SELECT id FROM classes WHERE id = ?")
+                .bind(class_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+
+            if existing_class.is_some() {
+                // Update existing class
+                sqlx::query("UPDATE classes SET name = ?, school_year = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                    .bind(name)
+                    .bind(school_year)
+                    .bind(class_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                updated_classes += 1;
+            } else {
+                // Insert new class
+                sqlx::query("INSERT INTO classes (id, name, school_year) VALUES (?, ?, ?)")
+                    .bind(class_id)
+                    .bind(name)
+                    .bind(school_year)
+                    .execute(&mut *transaction)
+                    .await?;
+                imported_classes += 1;
+            }
+        }
+
+        // Import students
+        for student_data in students_data {
+            let student_id = student_data["id"].as_i64()
+                .ok_or_else(|| anyhow::anyhow!("Invalid student ID in backup"))?;
+            let class_id = student_data["class_id"].as_i64()
+                .ok_or_else(|| anyhow::anyhow!("Missing class ID in student data"))?;
+            let first_name = student_data["first_name"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing first name in backup"))?;
+            let last_name = student_data["last_name"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing last name in backup"))?;
+            let status = student_data["status"].as_str().unwrap_or("active");
+            let source_device_id = student_data["source_device_id"].as_str().unwrap_or("");
+
+            // Check if student exists
+            let existing_student = sqlx::query("SELECT id FROM students WHERE id = ?")
+                .bind(student_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+
+            if existing_student.is_some() {
+                // Update existing student
+                sqlx::query("UPDATE students SET class_id = ?, first_name = ?, last_name = ?, status = ?, source_device_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                    .bind(class_id)
+                    .bind(first_name)
+                    .bind(last_name)
+                    .bind(status)
+                    .bind(source_device_id)
+                    .bind(student_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                updated_students += 1;
+            } else {
+                // Insert new student
+                sqlx::query("INSERT INTO students (id, class_id, first_name, last_name, status, source_device_id) VALUES (?, ?, ?, ?, ?, ?)")
+                    .bind(student_id)
+                    .bind(class_id)
+                    .bind(first_name)
+                    .bind(last_name)
+                    .bind(status)
+                    .bind(source_device_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                imported_students += 1;
+            }
+        }
+
+        // Import observations
+        for observation_data in observations_data {
+            let observation_id = observation_data["id"].as_i64()
+                .ok_or_else(|| anyhow::anyhow!("Invalid observation ID in backup"))?;
+            let student_id = observation_data["student_id"].as_i64()
+                .ok_or_else(|| anyhow::anyhow!("Missing student ID in observation data"))?;
+            let author_id = observation_data["author_id"].as_i64()
+                .ok_or_else(|| anyhow::anyhow!("Missing author ID in observation data"))?;
+            let category = observation_data["category"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing category in observation data"))?;
+            let text = observation_data["text"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing text in observation data"))?;
+            let tags = observation_data["tags"].as_str().unwrap_or("[]");
+            let created_at = observation_data["created_at"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing created_at in observation data"))?;
+            let updated_at = observation_data["updated_at"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing updated_at in observation data"))?;
+            let source_device_id = observation_data["source_device_id"].as_str().unwrap_or("");
+
+            // Check if observation exists
+            let existing_observation = sqlx::query("SELECT id FROM observations WHERE id = ?")
+                .bind(observation_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+
+            if existing_observation.is_some() {
+                // Update existing observation
+                sqlx::query("UPDATE observations SET student_id = ?, author_id = ?, category = ?, text = ?, tags = ?, created_at = ?, updated_at = ?, source_device_id = ? WHERE id = ?")
+                    .bind(student_id)
+                    .bind(author_id)
+                    .bind(category)
+                    .bind(text)
+                    .bind(tags)
+                    .bind(created_at)
+                    .bind(updated_at)
+                    .bind(source_device_id)
+                    .bind(observation_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                updated_observations += 1;
+            } else {
+                // Insert new observation
+                sqlx::query("INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                    .bind(observation_id)
+                    .bind(student_id)
+                    .bind(author_id)
+                    .bind(category)
+                    .bind(text)
+                    .bind(tags)
+                    .bind(created_at)
+                    .bind(updated_at)
+                    .bind(source_device_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                imported_observations += 1;
+            }
+        }
+
+        // Commit transaction
+        transaction.commit().await?;
+
+        // Return comprehensive summary
+        Ok(format!(
+            "Imported full backup from device '{}' ({}) created at {}. New: {} students, {} classes, {} observations. Updated: {} students, {} classes, {} observations",
+            source_device_name,
+            source_device_type,
+            timestamp,
+            imported_students,
+            imported_classes,
+            imported_observations,
+            updated_students,
+            updated_classes,
+            updated_observations
+        ))
     }
 }

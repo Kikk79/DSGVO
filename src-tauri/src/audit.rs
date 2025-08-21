@@ -1,7 +1,7 @@
-use anyhow::{Result, Context};
-use sqlx::{Pool, Sqlite, Row, sqlite::SqlitePool};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use sqlx::{sqlite::SqlitePool, Pool, Row, Sqlite};
 use std::path::Path;
 
 pub struct AuditLogger {
@@ -25,12 +25,14 @@ impl AuditLogger {
     pub async fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.as_ref().parent() {
-            tokio::fs::create_dir_all(parent).await
+            tokio::fs::create_dir_all(parent)
+                .await
                 .context("Failed to create audit directory")?;
         }
 
         let db_url = format!("sqlite:{}?mode=rwc", db_path.as_ref().display());
-        let pool = SqlitePool::connect(&db_url).await
+        let pool = SqlitePool::connect(&db_url)
+            .await
             .context("Failed to connect to audit database")?;
 
         let logger = Self { pool };
@@ -68,9 +70,11 @@ impl AuditLogger {
             .execute(&self.pool)
             .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_object ON audit_log(object_type, object_id)")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_audit_object ON audit_log(object_type, object_id)",
+        )
+        .execute(&self.pool)
+        .await?;
 
         // Create triggers to prevent modification of audit log entries
         sqlx::query(
@@ -109,7 +113,7 @@ impl AuditLogger {
         details: Option<&str>,
     ) -> Result<i64> {
         let timestamp = Utc::now();
-        
+
         let result = sqlx::query(
             r#"
             INSERT INTO audit_log (action, object_type, object_id, user_id, timestamp, details)
@@ -140,7 +144,7 @@ impl AuditLogger {
     ) -> Result<i64> {
         let timestamp = Utc::now();
         let details_json = details.map(|d| d.to_string());
-        
+
         let result = sqlx::query(
             r#"
             INSERT INTO audit_log (action, object_type, object_id, user_id, timestamp, details, ip_address, user_agent)
@@ -233,17 +237,19 @@ impl AuditLogger {
     }
 
     pub async fn export_audit_log(&self, format: &str) -> Result<String> {
-        let entries = self.get_audit_trail(None, None, None, None, None, None).await?;
+        let entries = self
+            .get_audit_trail(None, None, None, None, None, None)
+            .await?;
 
         match format {
-            "json" => {
-                serde_json::to_string_pretty(&entries)
-                    .context("Failed to serialize audit log to JSON")
-            }
+            "json" => serde_json::to_string_pretty(&entries)
+                .context("Failed to serialize audit log to JSON"),
             "csv" => {
-                let mut csv_data = String::from("id,action,object_type,object_id,user_id,timestamp,details\n");
+                let mut csv_data =
+                    String::from("id,action,object_type,object_id,user_id,timestamp,details\n");
                 for entry in entries {
-                    let details = entry.details
+                    let details = entry
+                        .details
                         .map(|d| d.to_string())
                         .unwrap_or_default()
                         .replace('"', "\"\"");
@@ -260,7 +266,7 @@ impl AuditLogger {
                 }
                 Ok(csv_data)
             }
-            _ => Err(anyhow::anyhow!("Unsupported export format: {}", format))
+            _ => Err(anyhow::anyhow!("Unsupported export format: {}", format)),
         }
     }
 
@@ -270,7 +276,7 @@ impl AuditLogger {
         // 2. Check hash chains if implemented
         // 3. Verify digital signatures if implemented
         // 4. Check for gaps in sequence numbers
-        
+
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
             .fetch_one(&self.pool)
             .await?;

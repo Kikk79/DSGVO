@@ -1,8 +1,8 @@
-use anyhow::{Result, Context};
-use serde_json::{json, Value};
-use chrono::{DateTime, Utc, Duration};
 use crate::database::Database;
-use crate::{Student, Observation};
+use crate::{Observation, Student};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
+use serde_json::{json, Value};
 
 pub struct GdprManager;
 
@@ -118,34 +118,40 @@ impl GdprManager {
     pub async fn anonymize_expired_data(&self, _db: &Database) -> Result<u32> {
         let policy = Self::get_retention_policy();
         let cutoff_date = Utc::now() - Duration::days(policy.anonymization_after_days as i64);
-        
+
         // In a full implementation, this would:
         // 1. Find observations older than the cutoff date
         // 2. Replace personal identifiers with anonymized versions
         // 3. Remove or hash identifying information
         // 4. Log the anonymization in the audit trail
-        
-        tracing::info!("Anonymization would process observations older than {}", cutoff_date);
+
+        tracing::info!(
+            "Anonymization would process observations older than {}",
+            cutoff_date
+        );
         Ok(0) // Return count of anonymized records
     }
 
     pub async fn delete_expired_data(&self, _db: &Database) -> Result<u32> {
         let policy = Self::get_retention_policy();
         let cutoff_date = Utc::now() - Duration::days(policy.observation_retention_days as i64);
-        
+
         // In a full implementation, this would:
         // 1. Find observations older than the retention period
         // 2. Securely delete the data
         // 3. Update associated records
         // 4. Log the deletion in the audit trail
-        
-        tracing::info!("Deletion would process observations older than {}", cutoff_date);
+
+        tracing::info!(
+            "Deletion would process observations older than {}",
+            cutoff_date
+        );
         Ok(0) // Return count of deleted records
     }
 
     pub fn validate_data_minimization(observation_data: &Value) -> Result<Value> {
         let mut validated = observation_data.clone();
-        
+
         // Remove or validate optional fields based on data minimization principles
         if let Some(obj) = validated.as_object_mut() {
             // Remove empty optional fields
@@ -157,11 +163,11 @@ impl GdprManager {
                     "tags" => !value.as_array().map_or(false, |arr| arr.is_empty()),
                     "attachments" => !value.as_array().map_or(false, |arr| arr.is_empty()),
                     // Keep other fields if not empty
-                    _ => !value.is_null()
+                    _ => !value.is_null(),
                 }
             });
         }
-        
+
         Ok(validated)
     }
 

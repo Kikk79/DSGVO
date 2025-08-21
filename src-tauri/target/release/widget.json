@@ -1,0 +1,15 @@
+{
+   "pwsh" : {
+        "icon": "rectangle-terminal",
+        "color": "#2671be",
+        "label": "pwsh-preview",
+        "blockdef": {
+            "meta": {
+                "view": "term",
+                "controller": "shell",
+                "term:localshellpath": "C:\Program Files\PowerShell\7-preview\pwsh.exe"
+            }
+        }
+    }
+  
+}

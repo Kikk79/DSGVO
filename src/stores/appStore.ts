@@ -91,15 +91,22 @@ interface AppState {
   // eslint-disable-next-line no-unused-vars
   setLoading: (loading: boolean) => void;
   
-  // P2P Sync Functions
-  startP2PSync: () => Promise<void>;
-  stopP2PSync: () => Promise<void>;
-  // eslint-disable-next-line no-unused-vars
-  pairDevice: (pairingCode: string) => Promise<void>;
-  triggerSync: () => Promise<void>;
+  // File-based Sync Functions
   exportChangeset: () => Promise<string>;
   // eslint-disable-next-line no-unused-vars
   importChangeset: (changesetData: string) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  exportChangesetToFile: (filePath: string, daysBack?: number) => Promise<string>;
+  // eslint-disable-next-line no-unused-vars
+  importChangesetFromFile: (filePath: string) => Promise<string>;
+  // eslint-disable-next-line no-unused-vars
+  exportAllData: (daysBack?: number) => Promise<string>;
+  // eslint-disable-next-line no-unused-vars
+  importFullBackup: (filePath: string) => Promise<string>;
+  // eslint-disable-next-line no-unused-vars
+  importChangesetData: (changesetData: string) => Promise<string>;
+  // eslint-disable-next-line no-unused-vars
+  importFullBackupData: (backupData: string) => Promise<string>;
   
   // Device Configuration
   getDeviceConfig: () => Promise<void>;
@@ -364,70 +371,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setError: (error) => set({ error }),
   setLoading: (loading) => set({ loading }),
 
-  // P2P Sync implementations
-  startP2PSync: async () => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('start_p2p_sync');
-      set({ loading: false, error: null });
-    } catch (err) {
-      set({ 
-        error: `Failed to start P2P sync: ${err}`,
-        loading: false 
-      });
-      throw err;
-    }
-  },
-
-  stopP2PSync: async () => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('stop_p2p_sync');
-      set({ loading: false, error: null });
-    } catch (err) {
-      set({ 
-        error: `Failed to stop P2P sync: ${err}`,
-        loading: false 
-      });
-      throw err;
-    }
-  },
-
-  pairDevice: async (pairingCode: string) => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('pair_device', { pairingCode });
-      // Refresh sync status after successful pairing
-      await get().getSyncStatus();
-      set({ loading: false, error: null });
-    } catch (err) {
-      set({ 
-        error: `Failed to pair device: ${err}`,
-        loading: false 
-      });
-      throw err;
-    }
-  },
-
-  triggerSync: async () => {
-    set({ loading: true, error: null });
-    try {
-      await invoke('trigger_sync');
-      // Refresh data after sync
-      await Promise.all([
-        get().searchObservations(),
-        get().loadStudents(),
-        get().getSyncStatus()
-      ]);
-      set({ loading: false, error: null });
-    } catch (err) {
-      set({ 
-        error: `Failed to sync: ${err}`,
-        loading: false 
-      });
-      throw err;
-    }
-  },
+  // File-based Sync implementations
 
   exportChangeset: async (): Promise<string> => {
     set({ loading: true, error: null });
@@ -459,6 +403,129 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       set({ 
         error: `Failed to import changeset: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  exportChangesetToFile: async (filePath: string, daysBack?: number): Promise<string> => {
+    set({ loading: true, error: null });
+    try {
+      const result = await invoke('export_changeset_to_file', { 
+        filePath, 
+        daysBack: daysBack || 30 
+      }) as string;
+      set({ loading: false, error: null });
+      return result;
+    } catch (err) {
+      set({ 
+        error: `Failed to export changeset to file: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  importChangesetFromFile: async (filePath: string): Promise<string> => {
+    set({ loading: true, error: null });
+    try {
+      const result = await invoke('import_changeset_from_file', { filePath }) as string;
+      // Refresh all data after import
+      await Promise.all([
+        get().searchObservations(),
+        get().loadStudents(),
+        get().loadClasses(),
+        get().getSyncStatus()
+      ]);
+      set({ loading: false, error: null });
+      return result;
+    } catch (err) {
+      set({ 
+        error: `Failed to import changeset from file: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  exportAllData: async (daysBack?: number): Promise<string> => {
+    set({ loading: true, error: null });
+    try {
+      const result = await invoke('export_all_data', { 
+        daysBack: daysBack 
+      }) as string;
+      set({ loading: false, error: null });
+      return result;
+    } catch (err) {
+      set({ 
+        error: `Failed to export all data: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  importFullBackup: async (filePath: string): Promise<string> => {
+    set({ loading: true, error: null });
+    try {
+      const result = await invoke('import_full_backup', { filePath }) as string;
+      // Refresh all data after import
+      await Promise.all([
+        get().searchObservations(),
+        get().loadStudents(),
+        get().loadClasses(),
+        get().getSyncStatus()
+      ]);
+      set({ loading: false, error: null });
+      return result;
+    } catch (err) {
+      set({ 
+        error: `Failed to import full backup: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  importChangesetData: async (changesetData: string): Promise<string> => {
+    set({ loading: true, error: null });
+    try {
+      const result = await invoke('import_changeset_data', { changesetData }) as string;
+      // Refresh all data after import
+      await Promise.all([
+        get().searchObservations(),
+        get().loadStudents(),
+        get().loadClasses(),
+        get().getSyncStatus()
+      ]);
+      set({ loading: false, error: null });
+      return result;
+    } catch (err) {
+      set({ 
+        error: `Failed to import changeset data: ${err}`,
+        loading: false 
+      });
+      throw err;
+    }
+  },
+
+  importFullBackupData: async (backupData: string): Promise<string> => {
+    set({ loading: true, error: null });
+    try {
+      const result = await invoke('import_full_backup_data', { backupData }) as string;
+      // Refresh all data after import
+      await Promise.all([
+        get().searchObservations(),
+        get().loadStudents(),
+        get().loadClasses(),
+        get().getSyncStatus()
+      ]);
+      set({ loading: false, error: null });
+      return result;
+    } catch (err) {
+      set({ 
+        error: `Failed to import full backup data: ${err}`,
         loading: false 
       });
       throw err;

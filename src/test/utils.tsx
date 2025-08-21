@@ -13,7 +13,7 @@ export const createMockStore = (initialState = {}) => {
     error: null,
     syncStatus: null,
     deviceConfig: null,
-    currentPin: null,
+    // currentPin: removed - P2P no longer supported
     databasePath: null,
     ...initialState,
   };
@@ -34,18 +34,17 @@ export const createMockStore = (initialState = {}) => {
     getObservation: vi.fn(),
     setError: vi.fn(),
     setLoading: vi.fn(),
-    startP2PSync: vi.fn(),
-    stopP2PSync: vi.fn(),
-    pairDevice: vi.fn(),
-    triggerSync: vi.fn(),
     exportChangeset: vi.fn(),
     importChangeset: vi.fn(),
+    exportChangesetToFile: vi.fn(),
+    importChangesetFromFile: vi.fn(),
     getDeviceConfig: vi.fn(),
     setDeviceConfig: vi.fn(),
-    generatePairingPin: vi.fn(),
-    getCurrentPairingPin: vi.fn(),
-    clearPairingPin: vi.fn(),
-    getPairingCode: vi.fn(),
+    // P2P PIN functions removed - no longer supported
+    // generatePairingPin: vi.fn(),
+    // getCurrentPairingPin: vi.fn(),
+    // clearPairingPin: vi.fn(),
+    // getPairingCode: vi.fn(), // P2P function removed
     getDatabasePath: vi.fn(),
     setDatabasePath: vi.fn(),
   };

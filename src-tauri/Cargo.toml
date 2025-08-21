@@ -1,7 +1,7 @@
 [package]
 name = "schuelerbeobachtung"
 version = "0.1.0"
-description = "GDPR-compliant student observation system with P2P synchronization"
+description = "GDPR-compliant student observation system with changeset synchronization"
 authors = ["you"]
 edition = "2021"
 
@@ -26,16 +26,18 @@ thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 base64 = "0.22"
-rustls = "0.22"
-rustls-pemfile = "2.0"
-tokio-rustls = "0.25"
-mdns-sd = "0.10"
-rcgen = "0.12"
+# P2P dependencies removed - using file-based changeset sync
+# rustls = "0.22" 
+# rustls-pemfile = "2.0"
+# tokio-rustls = "0.25"
+# mdns-sd = "0.10"
+# rcgen = "0.12"
 # Encryption dependencies disabled
 # keyring = "2.3"
 # chacha20poly1305 = "0.10"
 rand = "0.8"
 env_logger = "0.11.3"
+sha2 = "0.10"
 
 
 tauri-plugin-updater = "2.0"

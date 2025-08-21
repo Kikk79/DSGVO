@@ -5,7 +5,7 @@ import { Dashboard } from './components/Dashboard';
 import { ObservationForm } from './components/ObservationForm';
 import { StudentSearch } from './components/StudentSearch';
 import { AddStudent } from './components/AddStudent';
-import { SyncManager } from './components/SyncManager';
+import { UnifiedSyncManager } from './components/UnifiedSyncManager';
 import { SettingsPage } from './components/SettingsPage';
 import { useAppStore } from './stores/appStore';
 
@@ -25,7 +25,7 @@ function App() {
             <Route path="/neue-beobachtung" element={<ObservationForm />} />
             <Route path="/schueler-suchen" element={<StudentSearch />} />
             <Route path="/schueler-hinzufuegen" element={<AddStudent />} />
-            <Route path="/sync" element={<SyncManager />} />
+            <Route path="/sync" element={<UnifiedSyncManager />} />
             <Route path="/einstellungen" element={<SettingsPage />} />
           </Routes>
         </Layout>
