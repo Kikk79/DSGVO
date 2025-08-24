@@ -11,6 +11,7 @@ import {
 import { useAppStore } from '../stores/appStore';
 import { format } from 'date-fns';
 import { de } from 'date-fns/locale';
+import { invoke } from '@tauri-apps/api/core';
 
 interface ObservationFormData {
   student_id: number;
@@ -19,13 +20,18 @@ interface ObservationFormData {
   tags: string;
 }
 
-const CATEGORIES = [
-  'Sozial',
-  'Fachlich',
-  'Verhalten',
-  'Förderung',
-  'Sonstiges'
-];
+interface Category {
+  id: number;
+  name: string;
+  color: string;
+  background_color: string;
+  text_color: string;
+  is_active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  source_device_id: string;
+}
 
 const QUICK_TAGS = [
   'Aufmerksamkeit',
@@ -44,6 +50,8 @@ export const ObservationForm: React.FC = () => {
   const { students, classes, createObservation, loading } = useAppStore();
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [customTag, setCustomTag] = useState('');
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [categoriesLoading, setCategoriesLoading] = useState(true);
 
   const {
     register,
@@ -69,7 +77,24 @@ export const ObservationForm: React.FC = () => {
     if (textareaEl.current) {
       textareaEl.current.focus();
     }
+    
+    // Load categories
+    loadCategories();
   }, []);
+
+  const loadCategories = async () => {
+    try {
+      setCategoriesLoading(true);
+      const result = await invoke<Category[]>('get_categories');
+      setCategories(result);
+    } catch (error) {
+      console.error('Failed to load categories:', error);
+      // Fallback to empty array if categories can't be loaded
+      setCategories([]);
+    } finally {
+      setCategoriesLoading(false);
+    }
+  };
 
   const selectedStudent = students.find(s => s.id === Number(watchedStudentId));
   const studentClass = selectedStudent ? classes.find(c => c.id === selectedStudent.class_id) : null;
@@ -209,31 +234,75 @@ export const ObservationForm: React.FC = () => {
                 Kategorie
               </h2>
               
-              <div>
-                <label htmlFor="category" className="sr-only">
-                  Kategorie auswählen
-                </label>
-                <select
-                  id="category"
-                  {...register('category', { 
-                    required: 'Bitte wählen Sie eine Kategorie aus' 
-                  })}
-                  className="select-field"
-                  aria-describedby={errors.category ? 'category-error' : undefined}
-                >
-                  <option value="">Kategorie auswählen...</option>
-                  {CATEGORIES.map(category => (
-                    <option key={category} value={category}>
-                      {category}
-                    </option>
-                  ))}
-                </select>
-                {errors.category && (
-                  <p id="category-error" className="mt-1 text-sm text-red-600">
-                    {errors.category.message}
+              {categoriesLoading ? (
+                <div className="flex justify-center py-4">
+                  <div className="animate-spin h-6 w-6 border-2 border-blue-500 border-t-transparent rounded-full" />
+                </div>
+              ) : (
+                <div>
+                  <label htmlFor="category" className="sr-only">
+                    Kategorie auswählen
+                  </label>
+                  <select
+                    id="category"
+                    {...register('category', { 
+                      required: 'Bitte wählen Sie eine Kategorie aus' 
+                    })}
+                    className="select-field"
+                    aria-describedby={errors.category ? 'category-error' : undefined}
+                  >
+                    <option value="">Kategorie auswählen...</option>
+                    {categories.map(category => (
+                      <option key={category.id} value={category.name}>
+                        {category.name}
+                      </option>
+                    ))}
+                  </select>
+                  {errors.category && (
+                    <p id="category-error" className="mt-1 text-sm text-red-600">
+                      {errors.category.message}
+                    </p>
+                  )}
+                  
+                  {/* Category Preview */}
+                  {watch('category') && (
+                    <div className="mt-3">
+                      <p className="text-sm font-medium text-gray-700 mb-2">Vorschau:</p>
+                      {(() => {
+                        const selectedCategory = categories.find(c => c.name === watch('category'));
+                        return selectedCategory ? (
+                          <span
+                            className="inline-block px-3 py-1 text-sm font-medium rounded-full"
+                            style={{
+                              backgroundColor: selectedCategory.background_color,
+                              color: selectedCategory.text_color,
+                              borderColor: selectedCategory.color,
+                              borderWidth: '1px',
+                            }}
+                          >
+                            {selectedCategory.name}
+                          </span>
+                        ) : null;
+                      })()}
+                    </div>
+                  )}
+                </div>
+              )}
+              
+              {categories.length === 0 && !categoriesLoading && (
+                <div className="text-center py-4">
+                  <p className="text-sm text-gray-500">
+                    Keine Kategorien verfügbar.{' '}
+                    <button
+                      type="button"
+                      onClick={() => navigate('/kategorien')}
+                      className="text-blue-600 hover:text-blue-800 underline"
+                    >
+                      Kategorien verwalten
+                    </button>
                   </p>
-                )}
-              </div>
+                </div>
+              )}
             </div>
 
             {/* Tags */}

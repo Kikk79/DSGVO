@@ -6,7 +6,9 @@ import {
   RefreshCw, 
   Settings, 
   Home,
-  User, PlusCircle
+  User, 
+  PlusCircle,
+  Palette
 } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
 
@@ -15,21 +17,7 @@ interface LayoutProps {
 }
 
 export const Layout: React.FC<LayoutProps> = ({ children }) => {
-  const { syncStatus, error } = useAppStore();
-
-  const getSyncStatusClass = () => {
-    if (!syncStatus) return 'status-yellow';
-    if (syncStatus.peer_connected) return 'status-green';
-    if (syncStatus.pending_changes > 0) return 'status-yellow';
-    return 'status-red';
-  };
-
-  const getSyncStatusText = () => {
-    if (!syncStatus) return 'Unbekannt';
-    if (syncStatus.peer_connected) return 'Verbunden';
-    if (syncStatus.pending_changes > 0) return `${syncStatus.pending_changes} ausstehend`;
-    return 'Getrennt';
-  };
+  const { error } = useAppStore();
 
   return (
     <div className="flex h-screen bg-gray-50">
@@ -122,9 +110,22 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
               >
                 <RefreshCw className="mr-3 h-5 w-5" aria-hidden="true" />
                 Synchronisation
-                <span className={`ml-2 ${getSyncStatusClass()}`}>
-                  {getSyncStatusText()}
-                </span>
+              </NavLink>
+            </li>
+            
+            <li>
+              <NavLink
+                to="/kategorien"
+                className={({ isActive }) =>
+                  `flex items-center px-3 py-2 rounded-md text-sm font-medium transition-colors focus-ring ${
+                    isActive
+                      ? 'bg-blue-100 text-blue-700'
+                      : 'text-gray-700 hover:bg-gray-100'
+                  }`
+                }
+              >
+                <Palette className="mr-3 h-5 w-5" aria-hidden="true" />
+                Kategorien
               </NavLink>
             </li>
             

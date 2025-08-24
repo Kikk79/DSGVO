@@ -7,6 +7,9 @@ mod database;
 mod audit;
 mod gdpr;
 
+#[cfg(test)]
+mod tests;
+
 use base64::Engine;
 use std::sync::Arc;
 use tauri::Manager;
@@ -37,6 +40,20 @@ pub struct Class {
     pub id: i64,
     pub name: String,
     pub school_year: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub source_device_id: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow, Clone)]
+pub struct Category {
+    pub id: i64,
+    pub name: String,
+    pub color: String, // Hex color code like "#3B82F6"
+    pub background_color: String, // Background color like "#EBF8FF" 
+    pub text_color: String, // Text color like "#1E3A8A"
+    pub is_active: bool,
+    pub sort_order: i32,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub source_device_id: String,
@@ -324,7 +341,7 @@ async fn export_all_data(
     };
 
     // Get device config for metadata
-    let device_config = state.crypto.get_device_config().await.map_err(|e| e.to_string())?;
+    let device_config = state.crypto.get_device_config().map_err(|e| e.to_string())?;
     
     // Create comprehensive export data
     let export_data = serde_json::json!({
@@ -338,8 +355,8 @@ async fn export_all_data(
             "total_observations": observations.len()
         },
         "source_device": {
-            "device_type": &device_config.device_type,
-            "device_name": device_config.device_name.as_ref()
+            "device_type": device_config.get("device_type").unwrap_or(&"unknown".to_string()),
+            "device_name": device_config.get("device_name")
         },
         "data": {
             "students": students,
@@ -437,9 +454,15 @@ async fn get_device_config(state: tauri::State<'_, AppState>) -> Result<DeviceCo
     let config = state
         .crypto
         .get_device_config()
-        .await
         .map_err(|e| e.to_string())?;
-    Ok(config)
+    
+    // Convert HashMap to DeviceConfig struct
+    let device_config = DeviceConfig {
+        device_type: config.get("device_type").unwrap_or(&"unknown".to_string()).clone(),
+        device_name: config.get("device_name").cloned(),
+    };
+    
+    Ok(device_config)
 }
 
 #[tauri::command]
@@ -448,21 +471,20 @@ async fn set_device_config(
     device_type: String,
     device_name: Option<String>,
 ) -> Result<(), String> {
-    let config = DeviceConfig {
-        device_type,
-        device_name,
+    let _config = DeviceConfig {
+        device_type: device_type.clone(),
+        device_name: device_name.clone(),
     };
 
     state
         .crypto
-        .set_device_config(&config)
-        .await
+        .set_device_config(Some(device_type.clone()), device_name)
         .map_err(|e| e.to_string())?;
 
     // Log the configuration change
     state
         .audit
-        .log_action("update", "device_config", 0, 1, Some(&config.device_type))
+        .log_action("update", "device_config", 0, 1, Some(&device_type))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -522,6 +544,88 @@ async fn delete_class(
         .await
         .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+// Category management commands
+#[tauri::command]
+async fn get_categories(state: tauri::State<'_, AppState>) -> Result<Vec<Category>, String> {
+    let db = state.db.lock().await;
+    db.get_categories().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_category(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    color: String,
+    background_color: String,
+    text_color: String,
+) -> Result<Category, String> {
+    let db = state.db.lock().await;
+    let category = db
+        .create_category(name.clone(), color, background_color, text_color)
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    // Log the creation
+    state
+        .audit
+        .log_action("create", "category", category.id, 1, Some(&name))
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    Ok(category)
+}
+
+#[tauri::command]
+async fn update_category(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    name: String,
+    color: String,
+    background_color: String,
+    text_color: String,
+) -> Result<(), String> {
+    let db = state.db.lock().await;
+    db.update_category(id, name.clone(), color, background_color, text_color)
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    // Log the update
+    state
+        .audit
+        .log_action("update", "category", id, 1, Some(&name))
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_category(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    force_delete: Option<bool>,
+) -> Result<(), String> {
+    let force_delete = force_delete.unwrap_or(false);
+    let db = state.db.lock().await;
+    
+    // Log the deletion attempt
+    let delete_type = if force_delete {
+        "force_delete"
+    } else {
+        "safe_delete"
+    };
+    state
+        .audit
+        .log_action("delete", "category", id, 1, Some(delete_type))
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    db.delete_category(id, force_delete)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -703,6 +807,10 @@ fn main() {
             create_student,
             delete_student,
             delete_class,
+            get_categories,
+            create_category,
+            update_category,
+            delete_category,
             // P2P commands removed - using file-based changeset sync:
             // start_p2p_sync, stop_p2p_sync, pair_device, generate_pairing_pin,
             // get_pairing_code, get_current_pairing_pin, clear_pairing_pin, trigger_sync

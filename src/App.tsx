@@ -7,6 +7,7 @@ import { StudentSearch } from './components/StudentSearch';
 import { AddStudent } from './components/AddStudent';
 import { UnifiedSyncManager } from './components/UnifiedSyncManager';
 import { SettingsPage } from './components/SettingsPage';
+import { CategoryManager } from './components/CategoryManager';
 import { useAppStore } from './stores/appStore';
 
 function App() {
@@ -26,6 +27,7 @@ function App() {
             <Route path="/schueler-suchen" element={<StudentSearch />} />
             <Route path="/schueler-hinzufuegen" element={<AddStudent />} />
             <Route path="/sync" element={<UnifiedSyncManager />} />
+            <Route path="/kategorien" element={<CategoryManager />} />
             <Route path="/einstellungen" element={<SettingsPage />} />
           </Routes>
         </Layout>

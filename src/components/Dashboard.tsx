@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { 
   FileText, 
@@ -11,14 +11,53 @@ import {
 import { useAppStore } from '../stores/appStore';
 import { format, isToday } from 'date-fns';
 import { de } from 'date-fns/locale';
+import { invoke } from '@tauri-apps/api/core';
+
+interface Category {
+  id: number;
+  name: string;
+  color: string;
+  background_color: string;
+  text_color: string;
+  is_active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  source_device_id: string;
+}
 
 export const Dashboard: React.FC = () => {
   const { observations, students, searchObservations } = useAppStore();
+  const [categories, setCategories] = useState<Category[]>([]);
 
   useEffect(() => {
-    // Load today's observations
+    // Load today's observations and categories
     searchObservations();
+    loadCategories();
   }, [searchObservations]);
+
+  const loadCategories = async () => {
+    try {
+      const result = await invoke<Category[]>('get_categories');
+      setCategories(result);
+    } catch (error) {
+      console.error('Failed to load categories:', error);
+      setCategories([]);
+    }
+  };
+
+  const getCategoryColors = (categoryName: string) => {
+    const category = categories.find(c => c.name === categoryName);
+    return category ? {
+      backgroundColor: category.background_color,
+      color: category.text_color,
+      borderColor: category.color,
+    } : {
+      backgroundColor: '#F3F4F6',
+      color: '#374151',
+      borderColor: '#6B7280',
+    };
+  };
 
   const todayObservations = observations.filter(obs => 
     isToday(new Date(obs.created_at))
@@ -172,7 +211,14 @@ export const Dashboard: React.FC = () => {
                           <Clock className="h-3 w-3 mr-1" aria-hidden="true" />
                           {format(new Date(observation.created_at), 'HH:mm', { locale: de })}
                         </span>
-                        <span className="px-2 py-1 bg-gray-100 rounded-full">
+                        <span 
+                          className="px-2 py-1 rounded-full text-sm font-medium"
+                          style={{
+                            ...getCategoryColors(observation.category),
+                            borderWidth: '1px',
+                            borderStyle: 'solid',
+                          }}
+                        >
                           {observation.category}
                         </span>
                       </div>

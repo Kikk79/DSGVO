@@ -3,6 +3,20 @@ import { Search, Download, Filter, Calendar, Trash2, AlertTriangle } from 'lucid
 import { useAppStore } from '../stores/appStore';
 import { format } from 'date-fns';
 import { de } from 'date-fns/locale';
+import { invoke } from '@tauri-apps/api/core';
+
+interface Category {
+  id: number;
+  name: string;
+  color: string;
+  background_color: string;
+  text_color: string;
+  is_active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  source_device_id: string;
+}
 
 export const StudentSearch: React.FC = () => {
   const { 
@@ -25,8 +39,7 @@ export const StudentSearch: React.FC = () => {
     studentName: string;
     show: boolean;
   } | null>(null);
-
-  const CATEGORIES = ['Sozial', 'Fachlich', 'Verhalten', 'Förderung', 'Sonstiges'];
+  const [categories, setCategories] = useState<Category[]>([]);
 
   useEffect(() => {
     searchObservations(
@@ -34,7 +47,31 @@ export const StudentSearch: React.FC = () => {
       selectedStudent || undefined, 
       selectedCategory || undefined
     );
+    loadCategories();
   }, [searchQuery, selectedStudent, selectedCategory, searchObservations]);
+
+  const loadCategories = async () => {
+    try {
+      const result = await invoke<Category[]>('get_categories');
+      setCategories(result);
+    } catch (error) {
+      console.error('Failed to load categories:', error);
+      setCategories([]);
+    }
+  };
+
+  const getCategoryColors = (categoryName: string) => {
+    const category = categories.find(c => c.name === categoryName);
+    return category ? {
+      backgroundColor: category.background_color,
+      color: category.text_color,
+      borderColor: category.color,
+    } : {
+      backgroundColor: '#F3F4F6',
+      color: '#374151',
+      borderColor: '#6B7280',
+    };
+  };
 
   const handleExport = async (studentId: number, format: string) => {
     try {
@@ -165,9 +202,9 @@ export const StudentSearch: React.FC = () => {
                 className="select-field"
               >
                 <option value="">Alle Kategorien</option>
-                {CATEGORIES.map(category => (
-                  <option key={category} value={category}>
-                    {category}
+                {categories.map(category => (
+                  <option key={category.id} value={category.name}>
+                    {category.name}
                   </option>
                 ))}
               </select>
@@ -194,7 +231,14 @@ export const StudentSearch: React.FC = () => {
                       <h3 className="text-lg font-medium text-gray-900">
                         {student ? `${student.first_name} ${student.last_name}` : 'Unbekannter Schüler'}
                       </h3>
-                      <span className="px-2 py-1 text-xs bg-gray-100 text-gray-800 rounded-full">
+                      <span 
+                        className="px-2 py-1 text-xs rounded-full font-medium"
+                        style={{
+                          ...getCategoryColors(observation.category),
+                          borderWidth: '1px',
+                          borderStyle: 'solid',
+                        }}
+                      >
                         {observation.category}
                       </span>
                     </div>
