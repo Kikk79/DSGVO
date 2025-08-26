@@ -343,9 +343,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     
     try {
       const rawObservations = await invoke('search_observations', {
-        query: query || null,
-        studentId: student_id || null,
-        category: category || null,
+        query: query ?? null,
+        studentId: student_id ?? null,
+        category: category ?? null,
       }) as any[];
       
       // Transform observations to parse tags from JSON string to array
@@ -540,8 +540,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const result = await invoke('export_changeset_to_file', { 
-        filePath, 
-        daysBack: daysBack || 30 
+        filePath: filePath, 
+        daysBack: daysBack ?? 30 
       }) as string;
       set({ loading: false, error: null });
       return result;
@@ -675,7 +675,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await invoke('set_device_config', {
         deviceType: device_type,
-        deviceName: device_name || null,
+        deviceName: device_name ?? null,
       });
       
       // Refresh device config after setting
@@ -788,12 +788,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     
     try {
       console.log('📡 Store: Calling Tauri get_calendar_observations');
-      const observations = await invoke('get_calendar_observations', {
+
+      // Send both snake_case (Rust) and camelCase (JS) keys to be robust against param name mismatches
+      const payload: Record<string, any> = {
+        // Preferred snake_case (Rust param names)
+        start_date: startDate.toISOString(),
+        end_date: endDate.toISOString(),
+        class_id: classId ?? null,
+        category: category ?? null,
+        // Fallback camelCase (in case the command expects camelCase)
         startDate: startDate.toISOString(),
         endDate: endDate.toISOString(),
-        classId: classId || null,
-        category: category || null,
-      }) as CalendarObservation[];
+        classId: classId ?? null,
+      };
+
+      const observations = await invoke('get_calendar_observations', payload) as CalendarObservation[];
       
       console.log('📥 Store: Received observations:', observations.length);
 

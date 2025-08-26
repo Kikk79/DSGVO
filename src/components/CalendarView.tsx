@@ -50,26 +50,66 @@ export const CalendarView: React.FC = () => {
     error: state.error,
   }));
 
-  // Get stable function references using getState to avoid dependency issues
-  const getStoreFunctions = useCallback(() => useAppStore.getState(), []);
-
   const [showFilters, setShowFilters] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
+  const [hasInitialized, setHasInitialized] = useState(false);
   const calendarRef = React.useRef<FullCalendar>(null);
 
-  // Load classes and categories on mount
-  useEffect(() => {
-    const initializeData = async () => {
-      const { loadClasses, loadCategories } = getStoreFunctions();
-      if (classes.length === 0) await loadClasses();
-      if (categories.length === 0) await loadCategories();
-    };
-    initializeData();
-  }, [classes.length, categories.length, getStoreFunctions]);
+  // Track last loaded range to prevent duplicate loads
+  const lastRangeRef = React.useRef<{ start: string; end: string } | null>(null);
+  // Skip the very first datesSet that fires on mount; initial effect will load
+  const hasCalendarMountedRef = React.useRef(false);
 
-  // Initial calendar events load - load current week by default
+  // Load classes and categories on mount - no function dependencies
   useEffect(() => {
+    let isMounted = true;
+    
+    const initializeData = async () => {
+      console.log('📋 CalendarView: Initializing data (classes/categories)');
+      
+      try {
+        const store = useAppStore.getState();
+        
+        if (store.classes.length === 0) {
+          console.log('📋 CalendarView: Loading classes');
+          await store.loadClasses();
+        }
+        
+        if (store.categories.length === 0) {
+          console.log('🎨 CalendarView: Loading categories');
+          await store.loadCategories();
+        }
+        
+        if (isMounted) {
+          console.log('✅ CalendarView: Data initialization complete');
+        }
+      } catch (error) {
+        console.error('❌ CalendarView: Error initializing data:', error);
+      }
+    };
+
+    // Only initialize if we haven't already and we need to load data
+    if (!hasInitialized && (classes.length === 0 || categories.length === 0)) {
+      initializeData();
+    }
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [classes.length, categories.length, hasInitialized]);
+
+  // Load initial calendar events - separate effect with stable dependencies
+  useEffect(() => {
+    let isMounted = true;
+    
     const loadInitialEvents = async () => {
+      console.log('📅 CalendarView: Loading initial calendar events');
+      console.log('📅 CalendarView: Current filters:', {
+        classId: calendarFilters.classId,
+        category: calendarFilters.category,
+        startWeek: calendarFilters.startWeek
+      });
+      
       const now = new Date();
       const weekStart = new Date(now);
       weekStart.setDate(now.getDate() - now.getDay() + (calendarFilters.startWeek === 'monday' ? 1 : 0));
@@ -79,36 +119,85 @@ export const CalendarView: React.FC = () => {
       weekEnd.setDate(weekStart.getDate() + 6);
       weekEnd.setHours(23, 59, 59, 999);
       
+      console.log('📅 CalendarView: Date range:', {
+        weekStart: weekStart.toISOString(),
+        weekEnd: weekEnd.toISOString()
+      });
+      
       try {
-        const { loadCalendarEvents } = getStoreFunctions();
-        await loadCalendarEvents(
-          weekStart,
-          weekEnd,
-          calendarFilters.classId || undefined,
-          calendarFilters.category || undefined
-        );
+        const store = useAppStore.getState();
+        
+        if (isMounted) {
+          await store.loadCalendarEvents(
+            weekStart,
+            weekEnd,
+            calendarFilters.classId || undefined,
+            calendarFilters.category || undefined
+          );
+          
+          if (isMounted && !hasInitialized) {
+            console.log('✅ CalendarView: Initial load complete, marking as initialized');
+            setHasInitialized(true);
+          }
+        }
       } catch (error) {
-        console.error('Failed to load initial calendar events:', error);
+        console.error('❌ CalendarView: Failed to load initial calendar events:', error);
+        if (isMounted && !hasInitialized) {
+          setHasInitialized(true); // Mark as initialized even on error to prevent retry loops
+        }
       }
     };
 
-    loadInitialEvents();
-  }, [calendarFilters.classId, calendarFilters.category, calendarFilters.startWeek, getStoreFunctions]);
+    // Only load if we have the necessary data and haven't initialized yet
+    if (classes.length > 0 && categories.length > 0 && !hasInitialized) {
+      loadInitialEvents();
+    }
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [classes.length, categories.length, calendarFilters.classId, calendarFilters.category, calendarFilters.startWeek, hasInitialized]);
 
   // Handle date range changes from calendar navigation
   const handleDatesSet = useCallback((dateInfo: any) => {
-    const { setCalendarDate, loadCalendarEvents, calendarFilters } = getStoreFunctions();
-    setCalendarDate(dateInfo.start);
-    loadCalendarEvents(
+    const startIso = dateInfo.start.toISOString();
+    const endIso = dateInfo.end.toISOString();
+    console.log('📅 CalendarView: Date range changed', { start: dateInfo.start, end: dateInfo.end });
+
+    const store = useAppStore.getState();
+
+    // Always reflect current calendar date in store
+    store.setCalendarDate(dateInfo.start);
+
+    // On first mount, just record the range and skip loading (initial effect handles first fetch)
+    if (!hasCalendarMountedRef.current) {
+      hasCalendarMountedRef.current = true;
+      lastRangeRef.current = { start: startIso, end: endIso };
+      return;
+    }
+
+    // If range hasn't actually changed, skip to avoid loops
+    const last = lastRangeRef.current;
+    if (last && last.start === startIso && last.end === endIso) {
+      // console.log('⏭️ CalendarView: Skipping load, range unchanged');
+      return;
+    }
+
+    lastRangeRef.current = { start: startIso, end: endIso };
+
+    // Load events for new date range
+    store.loadCalendarEvents(
       dateInfo.start,
       dateInfo.end,
-      calendarFilters.classId || undefined,
-      calendarFilters.category || undefined
+      store.calendarFilters.classId || undefined,
+      store.calendarFilters.category || undefined
     );
-  }, [getStoreFunctions]);
+  }, []);
 
   // Handle event clicks
   const handleEventClick = useCallback((clickInfo: any) => {
+    console.log('🖱️ CalendarView: Event clicked', clickInfo.event.id);
+    
     const event = clickInfo.event;
     const calendarEvent: CalendarEvent = {
       id: event.id,
@@ -125,12 +214,15 @@ export const CalendarView: React.FC = () => {
 
   // Handle view mode changes
   const handleViewChange = useCallback((newView: 'dayGridMonth' | 'timeGridWeek' | 'timeGridDay' | 'listWeek') => {
-    const { setCalendarView } = getStoreFunctions();
-    setCalendarView(newView);
+    console.log('👁️ CalendarView: View changed to', newView);
+    
+    const store = useAppStore.getState();
+    store.setCalendarView(newView);
+    
     if (calendarRef.current) {
       calendarRef.current.getApi().changeView(newView);
     }
-  }, [getStoreFunctions]);
+  }, []);
 
   // Navigate to today
   const handleToday = useCallback(() => {
@@ -154,23 +246,41 @@ export const CalendarView: React.FC = () => {
 
   // Handle filter changes
   const handleClassFilter = useCallback((classId: number | null) => {
-    const { setCalendarFilters } = getStoreFunctions();
-    setCalendarFilters({ classId });
-  }, [getStoreFunctions]);
+    console.log('🏫 CalendarView: Class filter changed', classId);
+    
+    const store = useAppStore.getState();
+    store.setCalendarFilters({ classId });
+    
+    // Reload events for current visible range with updated filters
+    if (calendarRef.current) {
+      const api = calendarRef.current.getApi();
+      const start = api.view.activeStart;
+      const end = api.view.activeEnd;
+      store.loadCalendarEvents(start, end, classId ?? undefined, store.calendarFilters.category ?? undefined);
+    }
+  }, []);
 
   const handleCategoryFilter = useCallback((category: string | null) => {
-    const { setCalendarFilters } = getStoreFunctions();
-    setCalendarFilters({ category });
-  }, [getStoreFunctions]);
+    console.log('🏷️ CalendarView: Category filter changed', category);
+    
+    const store = useAppStore.getState();
+    store.setCalendarFilters({ category });
+    
+    // Reload events for current visible range with updated filters
+    if (calendarRef.current) {
+      const api = calendarRef.current.getApi();
+      const start = api.view.activeStart;
+      const end = api.view.activeEnd;
+      store.loadCalendarEvents(start, end, store.calendarFilters.classId ?? undefined, category ?? undefined);
+    }
+  }, []);
 
-  // FullCalendar options - memoized to prevent re-renders
-  const calendarOptions = React.useMemo(() => ({
+  // FullCalendar base options - keep stable to avoid re-initialization loops
+  const baseCalendarOptions = React.useMemo(() => ({
     plugins: [dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin],
     initialView: calendarView,
     headerToolbar: false as false, // We'll use a custom header
-    events: calendarEvents,
     eventClick: handleEventClick,
-    datesSet: handleDatesSet,
     weekends: calendarFilters.showWeekends,
     firstDay: calendarFilters.startWeek === 'monday' ? 1 : 0,
     height: 'auto',
@@ -183,11 +293,9 @@ export const CalendarView: React.FC = () => {
     },
     eventClassNames: ['cursor-pointer', 'hover:opacity-80', 'transition-opacity'],
   }), [
-    calendarView, 
-    calendarEvents, 
-    handleEventClick, 
-    handleDatesSet, 
-    calendarFilters.showWeekends, 
+    calendarView,
+    handleEventClick,
+    calendarFilters.showWeekends,
     calendarFilters.startWeek
   ]);
 
@@ -265,8 +373,11 @@ export const CalendarView: React.FC = () => {
 
               <button
                 onClick={() => {
-                  const { setCalendarFilters, calendarFilters: currentFilters } = getStoreFunctions();
-                  setCalendarFilters({ showWeekends: !currentFilters.showWeekends });
+                  console.log('⚙️ CalendarView: Weekend toggle clicked');
+                  
+                  const store = useAppStore.getState();
+                  const currentFilters = store.calendarFilters;
+                  store.setCalendarFilters({ showWeekends: !currentFilters.showWeekends });
                 }}
                 className="p-2 rounded-md text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors"
                 title="Einstellungen"
@@ -335,7 +446,12 @@ export const CalendarView: React.FC = () => {
             </div>
           ) : (
             <div>
-              <FullCalendar ref={calendarRef} {...calendarOptions} />
+              <FullCalendar
+                ref={calendarRef}
+                {...baseCalendarOptions}
+                events={calendarEvents}
+                datesSet={handleDatesSet}
+              />
               {calendarEvents.length === 0 && !calendarLoading && (
                 <div className="text-center py-8 text-gray-500">
                   <p>Keine Beobachtungen im ausgewählten Zeitraum gefunden.</p>
