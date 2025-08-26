@@ -31,21 +31,27 @@ const viewModes: ViewMode[] = [
 ];
 
 export const CalendarView: React.FC = () => {
-  const {
-    calendarEvents,
-    calendarView,
-    calendarFilters,
-    classes,
-    categories,
-    calendarLoading,
-    error,
-    loadCalendarEvents,
-    setCalendarView,
-    setCalendarDate,
-    setCalendarFilters,
-    loadClasses,
-    loadCategories,
-  } = useAppStore();
+  // Extract only stable data from store to prevent re-render loops
+  const { 
+    calendarEvents, 
+    calendarView, 
+    calendarFilters, 
+    classes, 
+    categories, 
+    calendarLoading, 
+    error 
+  } = useAppStore(state => ({
+    calendarEvents: state.calendarEvents,
+    calendarView: state.calendarView,
+    calendarFilters: state.calendarFilters,
+    classes: state.classes,
+    categories: state.categories,
+    calendarLoading: state.calendarLoading,
+    error: state.error,
+  }));
+
+  // Get stable function references using getState to avoid dependency issues
+  const getStoreFunctions = useCallback(() => useAppStore.getState(), []);
 
   const [showFilters, setShowFilters] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
@@ -54,11 +60,12 @@ export const CalendarView: React.FC = () => {
   // Load classes and categories on mount
   useEffect(() => {
     const initializeData = async () => {
+      const { loadClasses, loadCategories } = getStoreFunctions();
       if (classes.length === 0) await loadClasses();
       if (categories.length === 0) await loadCategories();
     };
     initializeData();
-  }, [classes.length, categories.length, loadClasses, loadCategories]);
+  }, [classes.length, categories.length, getStoreFunctions]);
 
   // Initial calendar events load - load current week by default
   useEffect(() => {
@@ -73,6 +80,7 @@ export const CalendarView: React.FC = () => {
       weekEnd.setHours(23, 59, 59, 999);
       
       try {
+        const { loadCalendarEvents } = getStoreFunctions();
         await loadCalendarEvents(
           weekStart,
           weekEnd,
@@ -84,12 +92,12 @@ export const CalendarView: React.FC = () => {
       }
     };
 
-    // Load events immediately, don't wait for classes/categories
     loadInitialEvents();
-  }, [loadCalendarEvents, calendarFilters.classId, calendarFilters.category, calendarFilters.startWeek]);
+  }, [calendarFilters.classId, calendarFilters.category, calendarFilters.startWeek, getStoreFunctions]);
 
   // Handle date range changes from calendar navigation
   const handleDatesSet = useCallback((dateInfo: any) => {
+    const { setCalendarDate, loadCalendarEvents, calendarFilters } = getStoreFunctions();
     setCalendarDate(dateInfo.start);
     loadCalendarEvents(
       dateInfo.start,
@@ -97,7 +105,7 @@ export const CalendarView: React.FC = () => {
       calendarFilters.classId || undefined,
       calendarFilters.category || undefined
     );
-  }, [calendarFilters, loadCalendarEvents, setCalendarDate]);
+  }, [getStoreFunctions]);
 
   // Handle event clicks
   const handleEventClick = useCallback((clickInfo: any) => {
@@ -117,11 +125,12 @@ export const CalendarView: React.FC = () => {
 
   // Handle view mode changes
   const handleViewChange = useCallback((newView: 'dayGridMonth' | 'timeGridWeek' | 'timeGridDay' | 'listWeek') => {
+    const { setCalendarView } = getStoreFunctions();
     setCalendarView(newView);
     if (calendarRef.current) {
       calendarRef.current.getApi().changeView(newView);
     }
-  }, [setCalendarView]);
+  }, [getStoreFunctions]);
 
   // Navigate to today
   const handleToday = useCallback(() => {
@@ -145,15 +154,17 @@ export const CalendarView: React.FC = () => {
 
   // Handle filter changes
   const handleClassFilter = useCallback((classId: number | null) => {
+    const { setCalendarFilters } = getStoreFunctions();
     setCalendarFilters({ classId });
-  }, [setCalendarFilters]);
+  }, [getStoreFunctions]);
 
   const handleCategoryFilter = useCallback((category: string | null) => {
+    const { setCalendarFilters } = getStoreFunctions();
     setCalendarFilters({ category });
-  }, [setCalendarFilters]);
+  }, [getStoreFunctions]);
 
-  // FullCalendar options
-  const calendarOptions = {
+  // FullCalendar options - memoized to prevent re-renders
+  const calendarOptions = React.useMemo(() => ({
     plugins: [dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin],
     initialView: calendarView,
     headerToolbar: false as false, // We'll use a custom header
@@ -171,7 +182,14 @@ export const CalendarView: React.FC = () => {
       info.el.title = info.event.extendedProps.fullText || info.event.title;
     },
     eventClassNames: ['cursor-pointer', 'hover:opacity-80', 'transition-opacity'],
-  };
+  }), [
+    calendarView, 
+    calendarEvents, 
+    handleEventClick, 
+    handleDatesSet, 
+    calendarFilters.showWeekends, 
+    calendarFilters.startWeek
+  ]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -246,9 +264,10 @@ export const CalendarView: React.FC = () => {
               </button>
 
               <button
-                onClick={() => setCalendarFilters({ 
-                  showWeekends: !calendarFilters.showWeekends 
-                })}
+                onClick={() => {
+                  const { setCalendarFilters, calendarFilters: currentFilters } = getStoreFunctions();
+                  setCalendarFilters({ showWeekends: !currentFilters.showWeekends });
+                }}
                 className="p-2 rounded-md text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors"
                 title="Einstellungen"
               >

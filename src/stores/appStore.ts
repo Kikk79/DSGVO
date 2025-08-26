@@ -776,10 +776,18 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Calendar actions
   loadCalendarEvents: async (startDate: Date, endDate: Date, classId?: number, category?: string) => {
+    console.log('🔄 Store: loadCalendarEvents called', {
+      startDate: startDate.toISOString(),
+      endDate: endDate.toISOString(),
+      classId,
+      category
+    });
+    
     set({ calendarLoading: true, error: null });
+    console.log('📤 Store: Set calendarLoading to true');
     
     try {
-      console.log('Loading calendar events from', startDate.toISOString(), 'to', endDate.toISOString());
+      console.log('📡 Store: Calling Tauri get_calendar_observations');
       const observations = await invoke('get_calendar_observations', {
         startDate: startDate.toISOString(),
         endDate: endDate.toISOString(),
@@ -787,7 +795,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         category: category || null,
       }) as CalendarObservation[];
       
-      console.log('Received observations:', observations.length);
+      console.log('📥 Store: Received observations:', observations.length);
 
       // Transform observations to calendar events
       const events: CalendarEvent[] = observations.map((obs) => ({
@@ -810,15 +818,18 @@ export const useAppStore = create<AppState>((set, get) => ({
         },
       }));
 
-      console.log('Transformed to calendar events:', events.length);
+      console.log('🔄 Store: Transformed to calendar events:', events.length);
+      console.log('📤 Store: Setting calendarLoading to false and updating events');
       set({ calendarEvents: events, calendarLoading: false });
+      console.log('✅ Store: Successfully completed loadCalendarEvents');
     } catch (error) {
-      console.error('Calendar events loading error:', error);
+      console.error('❌ Store: Calendar events loading error:', error);
       set({ 
         error: `Failed to load calendar events: ${error}`,
         calendarLoading: false,
         calendarEvents: [],
       });
+      console.log('📤 Store: Set calendarLoading to false due to error');
       throw error;
     }
   },

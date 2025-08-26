@@ -23,7 +23,16 @@
       "Bash(npm run lint:*)",
       "Bash(npx eslint:*)",
       "Bash(npm install:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "mcp__debug__listFiles",
+      "mcp__debug__getFileContent",
+      "mcp__debug__debug",
+      "Bash(timeout 20 npm run tauri:dev)",
+      "Bash(rmdir:*)",
+      "Bash(rm:*)",
+      "Bash(timeout 30 npm run tauri:dev)",
+      "mcp__Ref__ref_search_documentation",
+      "mcp__Ref__ref_read_url"
     ],
     "deny": [],
     "additionalDirectories": []
