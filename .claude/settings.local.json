@@ -16,7 +16,14 @@
       "Bash(cargo clippy:*)",
       "Bash(cargo fmt:*)",
       "Bash(cargo test)",
-      "mcp__clear-thought-mcp-server__sequentialthinking"
+      "mcp__clear-thought-mcp-server__sequentialthinking",
+      "Bash(find:*)",
+      "Bash(cargo:*)",
+      "Bash(npm run tauri:dev:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npx eslint:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)"
     ],
     "deny": [],
     "additionalDirectories": []

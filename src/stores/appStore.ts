@@ -15,6 +15,16 @@ export interface Class {
   school_year: string;
 }
 
+export interface Category {
+  id: number;
+  name: string;
+  color: string;
+  background_color: string;
+  text_color: string;
+  is_active: boolean;
+  sort_order: number;
+}
+
 export interface Observation {
   id: number;
   student_id: number;
@@ -44,11 +54,92 @@ export interface ActivePin {
   expires_in_seconds: number;
 }
 
+export interface StudentWithStats {
+  id: number;
+  first_name: string;
+  last_name: string;
+  class_name: string;
+  class_id: number;
+  status: string;
+  observation_count: number;
+  last_observation_date: string | null;
+}
+
+export interface AssessmentRecord {
+  observation_id: number;
+  observation_created_at: string;
+  observation_updated_at: string;
+  student_id: number;
+  student_first_name: string;
+  student_last_name: string;
+  class_id: number;
+  class_name: string;
+  category: string;
+  category_color: string;
+  category_background_color: string;
+  category_text_color: string;
+  text: string;
+  tags: string;
+  author_id: number;
+  source_device_id: string;
+}
+
+export interface CalendarObservation {
+  id: number;
+  created_at: string;
+  student_id: number;
+  student_first_name: string;
+  student_last_name: string;
+  class_id: number;
+  class_name: string;
+  category: string;
+  category_color: string;
+  category_background_color: string;
+  category_text_color: string;
+  text: string;
+  tags: string;
+}
+
+export interface CalendarEvent {
+  id: string;
+  title: string;
+  start: Date;
+  end: Date;
+  backgroundColor: string;
+  borderColor: string;
+  textColor: string;
+  extendedProps: {
+    studentId: number;
+    studentName: string;
+    className: string;
+    category: string;
+    observationText: string;
+    fullText: string;
+    tags: string[];
+  };
+}
+
+export interface CalendarFilters {
+  classId: number | null;
+  category: string | null;
+  showWeekends: boolean;
+  startWeek: 'monday' | 'sunday';
+  density: 'compact' | 'comfortable' | 'spacious';
+}
+
 interface AppState {
   // Data
   students: Student[];
   classes: Class[];
   observations: Observation[];
+  categories: Category[];
+  
+  // Calendar State
+  calendarEvents: CalendarEvent[];
+  calendarView: 'dayGridMonth' | 'timeGridWeek' | 'timeGridDay' | 'listWeek';
+  calendarDate: Date;
+  calendarFilters: CalendarFilters;
+  calendarLoading: boolean;
   
   // UI State
   loading: boolean;
@@ -62,6 +153,7 @@ interface AppState {
   initializeApp: () => Promise<void>;
   loadStudents: () => Promise<void>;
   loadClasses: () => Promise<void>;
+  loadCategories: () => Promise<void>;
   // eslint-disable-next-line no-unused-vars
   createObservation: (data: {
     student_id: number;
@@ -119,6 +211,16 @@ interface AppState {
   clearPairingPin: () => Promise<void>;
   getPairingCode: () => Promise<string>;
   
+  // Calendar Functions
+  // eslint-disable-next-line no-unused-vars
+  loadCalendarEvents: (startDate: Date, endDate: Date, classId?: number, category?: string) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  setCalendarView: (view: 'dayGridMonth' | 'timeGridWeek' | 'timeGridDay' | 'listWeek') => void;
+  // eslint-disable-next-line no-unused-vars
+  setCalendarDate: (date: Date) => void;
+  // eslint-disable-next-line no-unused-vars
+  setCalendarFilters: (filters: Partial<CalendarFilters>) => void;
+  
   // Database Path Management
   getDatabasePath: () => Promise<void>;
   // eslint-disable-next-line no-unused-vars
@@ -130,6 +232,21 @@ export const useAppStore = create<AppState>((set, get) => ({
   students: [],
   classes: [],
   observations: [],
+  categories: [],
+  
+  // Calendar initial state
+  calendarEvents: [],
+  calendarView: 'timeGridWeek',
+  calendarDate: new Date(),
+  calendarFilters: {
+    classId: null,
+    category: null,
+    showWeekends: true,
+    startWeek: 'monday',
+    density: 'comfortable',
+  },
+  calendarLoading: false,
+  
   loading: false,
   error: null,
   syncStatus: null,
@@ -173,6 +290,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ classes, error: null });
     } catch (error) {
       set({ error: `Failed to load classes: ${error}` });
+      throw error;
+    }
+  },
+
+  loadCategories: async () => {
+    try {
+      const categories = await invoke('get_categories') as Category[];
+      set({ categories: categories.filter(cat => cat.is_active), error: null });
+    } catch (error) {
+      set({ error: `Failed to load categories: ${error}` });
       throw error;
     }
   },
@@ -645,5 +772,74 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
       throw err;
     }
+  },
+
+  // Calendar actions
+  loadCalendarEvents: async (startDate: Date, endDate: Date, classId?: number, category?: string) => {
+    set({ calendarLoading: true, error: null });
+    
+    try {
+      console.log('Loading calendar events from', startDate.toISOString(), 'to', endDate.toISOString());
+      const observations = await invoke('get_calendar_observations', {
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+        classId: classId || null,
+        category: category || null,
+      }) as CalendarObservation[];
+      
+      console.log('Received observations:', observations.length);
+
+      // Transform observations to calendar events
+      const events: CalendarEvent[] = observations.map((obs) => ({
+        id: obs.id.toString(),
+        title: `${obs.student_first_name} ${obs.student_last_name}`,
+        start: new Date(obs.created_at),
+        end: new Date(obs.created_at),
+        backgroundColor: obs.category_background_color || '#EBF8FF',
+        borderColor: obs.category_color || '#3B82F6',
+        textColor: obs.category_text_color || '#1E3A8A',
+        extendedProps: {
+          studentId: obs.student_id,
+          studentName: `${obs.student_first_name} ${obs.student_last_name}`,
+          className: obs.class_name,
+          category: obs.category,
+          observationText: obs.text.length > 50 ? 
+            obs.text.substring(0, 50) + '...' : obs.text,
+          fullText: obs.text,
+          tags: JSON.parse(obs.tags || '[]'),
+        },
+      }));
+
+      console.log('Transformed to calendar events:', events.length);
+      set({ calendarEvents: events, calendarLoading: false });
+    } catch (error) {
+      console.error('Calendar events loading error:', error);
+      set({ 
+        error: `Failed to load calendar events: ${error}`,
+        calendarLoading: false,
+        calendarEvents: [],
+      });
+      throw error;
+    }
+  },
+
+  setCalendarView: (view: 'dayGridMonth' | 'timeGridWeek' | 'timeGridDay' | 'listWeek') => {
+    set({ calendarView: view });
+    
+    // Persist to localStorage
+    localStorage.setItem('calendarView', view);
+  },
+
+  setCalendarDate: (date: Date) => {
+    set({ calendarDate: date });
+  },
+
+  setCalendarFilters: (filters: Partial<CalendarFilters>) => {
+    const currentFilters = get().calendarFilters;
+    const newFilters = { ...currentFilters, ...filters };
+    set({ calendarFilters: newFilters });
+    
+    // Persist to localStorage
+    localStorage.setItem('calendarFilters', JSON.stringify(newFilters));
   },
 }));

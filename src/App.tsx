@@ -8,6 +8,8 @@ import { AddStudent } from './components/AddStudent';
 import { UnifiedSyncManager } from './components/UnifiedSyncManager';
 import { SettingsPage } from './components/SettingsPage';
 import { CategoryManager } from './components/CategoryManager';
+import { AssessmentsTable } from './components/AssessmentsTable';
+import { CalendarView } from './components/CalendarView';
 import { useAppStore } from './stores/appStore';
 
 function App() {
@@ -28,6 +30,8 @@ function App() {
             <Route path="/schueler-hinzufuegen" element={<AddStudent />} />
             <Route path="/sync" element={<UnifiedSyncManager />} />
             <Route path="/kategorien" element={<CategoryManager />} />
+            <Route path="/bewertungen" element={<AssessmentsTable />} />
+            <Route path="/kalender" element={<CalendarView />} />
             <Route path="/einstellungen" element={<SettingsPage />} />
           </Routes>
         </Layout>

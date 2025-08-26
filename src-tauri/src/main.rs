@@ -49,9 +49,9 @@ pub struct Class {
 pub struct Category {
     pub id: i64,
     pub name: String,
-    pub color: String, // Hex color code like "#3B82F6"
-    pub background_color: String, // Background color like "#EBF8FF" 
-    pub text_color: String, // Text color like "#1E3A8A"
+    pub color: String,            // Hex color code like "#3B82F6"
+    pub background_color: String, // Background color like "#EBF8FF"
+    pub text_color: String,       // Text color like "#1E3A8A"
     pub is_active: bool,
     pub sort_order: i32,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -77,6 +77,55 @@ pub struct SyncStatus {
     pub peer_connected: bool,
     pub last_sync: Option<chrono::DateTime<chrono::Utc>>,
     pub pending_changes: u32,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct StudentWithStats {
+    pub id: i64,
+    pub first_name: String,
+    pub last_name: String,
+    pub class_name: String,
+    pub class_id: i64,
+    pub status: String,
+    pub observation_count: i64,
+    pub last_observation_date: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct AssessmentRecord {
+    pub observation_id: i64,
+    pub observation_created_at: chrono::DateTime<chrono::Utc>,
+    pub observation_updated_at: chrono::DateTime<chrono::Utc>,
+    pub student_id: i64,
+    pub student_first_name: String,
+    pub student_last_name: String,
+    pub class_id: i64,
+    pub class_name: String,
+    pub category: String,
+    pub category_color: String,
+    pub category_background_color: String,
+    pub category_text_color: String,
+    pub text: String,
+    pub tags: String, // JSON string
+    pub author_id: i64,
+    pub source_device_id: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct CalendarObservation {
+    pub id: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub student_id: i64,
+    pub student_first_name: String,
+    pub student_last_name: String,
+    pub class_id: i64,
+    pub class_name: String,
+    pub category: String,
+    pub category_color: String,
+    pub category_background_color: String,
+    pub category_text_color: String,
+    pub text: String,
+    pub tags: String, // JSON string
 }
 
 // Application state
@@ -128,6 +177,16 @@ async fn create_observation(
 async fn get_students(state: tauri::State<'_, AppState>) -> Result<Vec<Student>, String> {
     let db = state.db.lock().await;
     db.get_students().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_students_with_stats(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<StudentWithStats>, String> {
+    let db = state.db.lock().await;
+    db.get_students_with_stats()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -320,57 +379,77 @@ async fn export_all_data(
     days_back: Option<i32>,
 ) -> Result<String, String> {
     let db = state.db.lock().await;
-    
-    // Get all students, classes, and observations
-    let students = db.get_students().await.map_err(|e| e.to_string())?;
+
+    // Get all students, classes, categories, and observations
+    let students = db
+        .get_all_students_including_deleted()
+        .await
+        .map_err(|e| e.to_string())?;
     let classes = db.get_classes().await.map_err(|e| e.to_string())?;
-    
+    let categories = db.get_categories().await.map_err(|e| e.to_string())?;
+
     // Filter observations by date if specified
     let observations = if let Some(days) = days_back {
         if days > 0 {
             // Get observations from specific time range
             let cutoff_date = chrono::Utc::now() - chrono::Duration::days(days as i64);
-            db.get_observations_since(cutoff_date).await.map_err(|e| e.to_string())?
+            db.get_observations_since(cutoff_date)
+                .await
+                .map_err(|e| e.to_string())?
         } else {
             // days_back <= 0 means all data
-            db.search_observations(None, None, None).await.map_err(|e| e.to_string())?
+            db.search_observations(None, None, None)
+                .await
+                .map_err(|e| e.to_string())?
         }
     } else {
         // No filter - get all observations
-        db.search_observations(None, None, None).await.map_err(|e| e.to_string())?
+        db.search_observations(None, None, None)
+            .await
+            .map_err(|e| e.to_string())?
     };
 
     // Get device config for metadata
-    let device_config = state.crypto.get_device_config().map_err(|e| e.to_string())?;
-    
+    let device_config = state
+        .crypto
+        .get_device_config()
+        .map_err(|e| e.to_string())?;
+
     // Create comprehensive export data
     let export_data = serde_json::json!({
         "format": "full_export",
-        "version": "1.0",
+        "version": "1.1",
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "export_scope": {
             "days_back": days_back,
             "total_students": students.len(),
-            "total_classes": classes.len(), 
-            "total_observations": observations.len()
+            "total_classes": classes.len(),
+            "total_observations": observations.len(),
+            "total_categories": categories.len()
         },
         "source_device": {
             "device_type": device_config.get("device_type").unwrap_or(&"unknown".to_string()),
-            "device_name": device_config.get("device_name")
+            "device_name": device_config.get("device_name"),
+            "device_id": device_config.get("device_id")
         },
         "data": {
             "students": students,
             "classes": classes,
-            "observations": observations
+            "observations": observations,
+            "categories": categories
+        },
+        "device_config": {
+            "device_type": device_config.get("device_type").unwrap_or(&"unknown".to_string()).clone(),
+            "device_name": device_config.get("device_name").cloned()
         }
     });
 
     // Log the export
     let scope_description = match days_back {
         Some(days) if days > 0 => format!("last {} days", days),
-        _ => "all data".to_string()
+        _ => "all data".to_string(),
     };
-    
+
     state
         .audit
         .log_action("export", "all_data", 0, 1, Some(&scope_description))
@@ -455,13 +534,16 @@ async fn get_device_config(state: tauri::State<'_, AppState>) -> Result<DeviceCo
         .crypto
         .get_device_config()
         .map_err(|e| e.to_string())?;
-    
+
     // Convert HashMap to DeviceConfig struct
     let device_config = DeviceConfig {
-        device_type: config.get("device_type").unwrap_or(&"unknown".to_string()).clone(),
+        device_type: config
+            .get("device_type")
+            .unwrap_or(&"unknown".to_string())
+            .clone(),
         device_name: config.get("device_name").cloned(),
     };
-    
+
     Ok(device_config)
 }
 
@@ -567,14 +649,14 @@ async fn create_category(
         .create_category(name.clone(), color, background_color, text_color)
         .await
         .map_err(|e| e.to_string())?;
-        
+
     // Log the creation
     state
         .audit
         .log_action("create", "category", category.id, 1, Some(&name))
         .await
         .map_err(|e| e.to_string())?;
-        
+
     Ok(category)
 }
 
@@ -591,14 +673,14 @@ async fn update_category(
     db.update_category(id, name.clone(), color, background_color, text_color)
         .await
         .map_err(|e| e.to_string())?;
-        
+
     // Log the update
     state
         .audit
         .log_action("update", "category", id, 1, Some(&name))
         .await
         .map_err(|e| e.to_string())?;
-        
+
     Ok(())
 }
 
@@ -610,7 +692,7 @@ async fn delete_category(
 ) -> Result<(), String> {
     let force_delete = force_delete.unwrap_or(false);
     let db = state.db.lock().await;
-    
+
     // Log the deletion attempt
     let delete_type = if force_delete {
         "force_delete"
@@ -622,7 +704,7 @@ async fn delete_category(
         .log_action("delete", "category", id, 1, Some(delete_type))
         .await
         .map_err(|e| e.to_string())?;
-        
+
     db.delete_category(id, force_delete)
         .await
         .map_err(|e| e.to_string())?;
@@ -674,6 +756,120 @@ async fn get_observation(
 ) -> Result<Option<Observation>, String> {
     let db = state.db.lock().await;
     db.get_observation(observation_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_assessments_comprehensive(
+    state: tauri::State<'_, AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    sort_field: Option<String>,
+    sort_direction: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    category_filter: Option<String>,
+    class_filter: Option<String>,
+    student_filter: Option<String>,
+) -> Result<Vec<AssessmentRecord>, String> {
+    let db = state.db.lock().await;
+    db.get_assessments_comprehensive(
+        limit.unwrap_or(100),
+        offset.unwrap_or(0),
+        sort_field.unwrap_or_else(|| "observation_created_at".to_string()),
+        sort_direction.unwrap_or_else(|| "desc".to_string()),
+        date_from,
+        date_to,
+        category_filter,
+        class_filter,
+        student_filter,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn export_assessments_csv(
+    state: tauri::State<'_, AppState>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    category_filter: Option<String>,
+    class_filter: Option<String>,
+    student_filter: Option<String>,
+    sort_field: Option<String>,
+    sort_direction: Option<String>,
+) -> Result<String, String> {
+    let db = state.db.lock().await;
+    let assessments = db
+        .get_assessments_comprehensive(
+            10000, // High limit for export
+            0,     // No offset
+            sort_field.unwrap_or_else(|| "observation_created_at".to_string()),
+            sort_direction.unwrap_or_else(|| "desc".to_string()),
+            date_from,
+            date_to,
+            category_filter,
+            class_filter,
+            student_filter,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Convert to CSV format
+    let mut csv_content = String::new();
+    csv_content.push_str("Datum,Schüler*in,Klasse,Kategorie,Beobachtung,Tags\n");
+
+    for assessment in assessments {
+        let formatted_date = assessment.observation_created_at.format("%d.%m.%Y %H:%M");
+        let student_name = format!("{}, {}", assessment.student_last_name, assessment.student_first_name);
+        let tags: Vec<String> = serde_json::from_str(&assessment.tags).unwrap_or_default();
+        let tags_str = tags.join("; ");
+        
+        // Escape CSV values
+        let escaped_text = assessment.text.replace("\"", "\"\"");
+        let escaped_tags = tags_str.replace("\"", "\"\"");
+        
+        csv_content.push_str(&format!(
+            "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"\n",
+            formatted_date,
+            student_name,
+            assessment.class_name,
+            assessment.category,
+            escaped_text,
+            escaped_tags
+        ));
+    }
+
+    // Log the export
+    state
+        .audit
+        .log_action("export", "assessments_csv", 0, 1, Some("csv_export"))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(csv_content)
+}
+
+#[tauri::command]
+async fn get_calendar_observations(
+    state: tauri::State<'_, AppState>,
+    start_date: String,
+    end_date: String,
+    class_id: Option<i64>,
+    category: Option<String>,
+) -> Result<Vec<CalendarObservation>, String> {
+    // Parse date strings to DateTime
+    let start_dt = chrono::DateTime::parse_from_rfc3339(&start_date)
+        .map_err(|e| format!("Invalid start_date format: {}", e))?
+        .with_timezone(&chrono::Utc);
+    
+    let end_dt = chrono::DateTime::parse_from_rfc3339(&end_date)
+        .map_err(|e| format!("Invalid end_date format: {}", e))?
+        .with_timezone(&chrono::Utc);
+
+    let db = state.db.lock().await;
+    db.get_calendar_observations(start_dt, end_dt, class_id, category)
         .await
         .map_err(|e| e.to_string())
 }
@@ -800,6 +996,7 @@ fn main() {
             get_observation,
             delete_observation,
             get_students,
+            get_students_with_stats,
             get_classes,
             search_observations,
             export_student_data,
@@ -811,6 +1008,9 @@ fn main() {
             create_category,
             update_category,
             delete_category,
+            get_assessments_comprehensive,
+            export_assessments_csv,
+            get_calendar_observations,
             // P2P commands removed - using file-based changeset sync:
             // start_p2p_sync, stop_p2p_sync, pair_device, generate_pairing_pin,
             // get_pairing_code, get_current_pairing_pin, clear_pairing_pin, trigger_sync

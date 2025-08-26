@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { 
   FileText, 
   Search, 
@@ -12,6 +12,7 @@ import { useAppStore } from '../stores/appStore';
 import { format, isToday } from 'date-fns';
 import { de } from 'date-fns/locale';
 import { invoke } from '@tauri-apps/api/core';
+import { StudentListModal } from './StudentListModal';
 
 interface Category {
   id: number;
@@ -29,6 +30,8 @@ interface Category {
 export const Dashboard: React.FC = () => {
   const { observations, students, searchObservations } = useAppStore();
   const [categories, setCategories] = useState<Category[]>([]);
+  const [showStudentListModal, setShowStudentListModal] = useState(false);
+  const navigate = useNavigate();
 
   useEffect(() => {
     // Load today's observations and categories
@@ -163,19 +166,38 @@ export const Dashboard: React.FC = () => {
 
       {/* Statistics */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {stats.map((stat) => (
-          <div key={stat.name} className="card">
-            <div className="flex items-center">
-              <div className={`flex-shrink-0 p-3 ${stat.bgColor} rounded-lg`}>
-                <stat.icon className={`h-6 w-6 ${stat.color}`} aria-hidden="true" />
+        {stats.map((stat) => {
+          const isStudentCard = stat.name === 'Gesamte Schüler';
+          const isWeekCard = stat.name === 'Diese Woche';
+          const isClickable = isStudentCard || isWeekCard;
+          const CardElement = isClickable ? 'button' : 'div';
+          
+          const handleClick = () => {
+            if (isStudentCard) {
+              setShowStudentListModal(true);
+            } else if (isWeekCard) {
+              navigate('/kalender');
+            }
+          };
+          
+          return (
+            <CardElement
+              key={stat.name}
+              className={`card ${isClickable ? 'hover:shadow-md transition-shadow cursor-pointer focus-ring' : ''}`}
+              onClick={isClickable ? handleClick : undefined}
+            >
+              <div className="flex items-center">
+                <div className={`flex-shrink-0 p-3 ${stat.bgColor} rounded-lg`}>
+                  <stat.icon className={`h-6 w-6 ${stat.color}`} aria-hidden="true" />
+                </div>
+                <div className="ml-4">
+                  <p className="text-2xl font-bold text-gray-900">{stat.value}</p>
+                  <p className="text-sm font-medium text-gray-500">{stat.name}</p>
+                </div>
               </div>
-              <div className="ml-4">
-                <p className="text-2xl font-bold text-gray-900">{stat.value}</p>
-                <p className="text-sm font-medium text-gray-500">{stat.name}</p>
-              </div>
-            </div>
-          </div>
-        ))}
+            </CardElement>
+          );
+        })}
       </div>
 
       {/* Recent Observations */}
@@ -248,6 +270,17 @@ export const Dashboard: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Student List Modal */}
+      <StudentListModal
+        isOpen={showStudentListModal}
+        onClose={() => setShowStudentListModal(false)}
+        onStudentClick={(studentId) => {
+          // For now, just close the modal. In the future, this could navigate to student details
+          console.log('Student clicked:', studentId);
+          setShowStudentListModal(false);
+        }}
+      />
     </div>
   );
 };

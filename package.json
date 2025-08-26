@@ -16,6 +16,11 @@
     "lint:fix": "eslint . --ext ts,tsx --fix"
   },
   "dependencies": {
+    "@fullcalendar/daygrid": "^6.1.19",
+    "@fullcalendar/interaction": "^6.1.19",
+    "@fullcalendar/list": "^6.1.19",
+    "@fullcalendar/react": "^6.1.19",
+    "@fullcalendar/timegrid": "^6.1.19",
     "@tauri-apps/api": ">=2.0.0",
     "@tauri-apps/plugin-dialog": ">=2.0.0",
     "@tauri-apps/plugin-fs": ">=2.0.0",

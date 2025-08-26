@@ -60,17 +60,13 @@ impl AuditLogger {
         .await?;
 
         // Create indexes for better query performance
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)",
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)")
+            .execute(&self.pool)
+            .await?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)",
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)")
+            .execute(&self.pool)
+            .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_audit_object ON audit_log(object_type, object_id)",
@@ -276,13 +272,11 @@ impl AuditLogger {
     pub async fn cleanup_old_entries(&self, retention_days: i32) -> Result<i64> {
         let cutoff_date = Utc::now() - chrono::Duration::days(retention_days as i64);
 
-        let result = sqlx::query(
-            "DELETE FROM audit_log WHERE timestamp < ?",
-        )
-        .bind(cutoff_date)
-        .execute(&self.pool)
-        .await
-        .context("Failed to cleanup old audit entries")?;
+        let result = sqlx::query("DELETE FROM audit_log WHERE timestamp < ?")
+            .bind(cutoff_date)
+            .execute(&self.pool)
+            .await
+            .context("Failed to cleanup old audit entries")?;
 
         Ok(result.rows_affected() as i64)
     }
@@ -307,20 +301,18 @@ impl AuditLogger {
     // Get statistics for GDPR compliance reporting
     pub async fn get_statistics(&self) -> Result<AuditStatistics> {
         let total_entries = self.count_entries().await?;
-        
-        let oldest_entry = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
-            "SELECT MIN(timestamp) FROM audit_log",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to get oldest audit entry")?;
 
-        let newest_entry = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
-            "SELECT MAX(timestamp) FROM audit_log",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to get newest audit entry")?;
+        let oldest_entry =
+            sqlx::query_scalar::<_, Option<DateTime<Utc>>>("SELECT MIN(timestamp) FROM audit_log")
+                .fetch_one(&self.pool)
+                .await
+                .context("Failed to get oldest audit entry")?;
+
+        let newest_entry =
+            sqlx::query_scalar::<_, Option<DateTime<Utc>>>("SELECT MAX(timestamp) FROM audit_log")
+                .fetch_one(&self.pool)
+                .await
+                .context("Failed to get newest audit entry")?;
 
         let actions_count = sqlx::query(
             "SELECT action, COUNT(*) as count FROM audit_log GROUP BY action ORDER BY count DESC",
@@ -414,7 +406,7 @@ mod tests {
 
         let entries = logger.get_entries(None, None).await.unwrap();
         assert_eq!(entries.len(), 1);
-        
+
         let entry = &entries[0];
         assert_eq!(entry.action, "create");
         assert_eq!(entry.object_type, "student");
@@ -442,7 +434,7 @@ mod tests {
 
         let entries = logger.get_entries(None, None).await.unwrap();
         assert_eq!(entries.len(), 1);
-        
+
         let entry = &entries[0];
         assert_eq!(entry.action, "delete");
         assert_eq!(entry.object_type, "observation");
@@ -457,9 +449,18 @@ mod tests {
         let (logger, _temp_dir) = create_test_audit_logger().await;
 
         // Log multiple actions for the same object
-        logger.log_action("create", "student", 123, 1, None).await.unwrap();
-        logger.log_action("update", "student", 123, 1, Some("Name change")).await.unwrap();
-        logger.log_action("delete", "student", 456, 1, None).await.unwrap();
+        logger
+            .log_action("create", "student", 123, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("update", "student", 123, 1, Some("Name change"))
+            .await
+            .unwrap();
+        logger
+            .log_action("delete", "student", 456, 1, None)
+            .await
+            .unwrap();
 
         let student_123_entries = logger.get_entries_for_object("student", 123).await.unwrap();
         assert_eq!(student_123_entries.len(), 2);
@@ -477,9 +478,18 @@ mod tests {
         let (logger, _temp_dir) = create_test_audit_logger().await;
 
         // Log actions for different users
-        logger.log_action("create", "student", 123, 1, None).await.unwrap();
-        logger.log_action("create", "student", 124, 1, None).await.unwrap();
-        logger.log_action("create", "student", 125, 2, None).await.unwrap();
+        logger
+            .log_action("create", "student", 123, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("create", "student", 124, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("create", "student", 125, 2, None)
+            .await
+            .unwrap();
 
         let user_1_entries = logger.get_entries_for_user(1, None).await.unwrap();
         assert_eq!(user_1_entries.len(), 2);
@@ -497,10 +507,22 @@ mod tests {
         let (logger, _temp_dir) = create_test_audit_logger().await;
 
         // Log different actions
-        logger.log_action("create", "student", 123, 1, None).await.unwrap();
-        logger.log_action("update", "student", 123, 1, None).await.unwrap();
-        logger.log_action("delete", "student", 123, 1, None).await.unwrap();
-        logger.log_action("create", "class", 456, 1, None).await.unwrap();
+        logger
+            .log_action("create", "student", 123, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("update", "student", 123, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("delete", "student", 123, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("create", "class", 456, 1, None)
+            .await
+            .unwrap();
 
         let create_entries = logger.get_entries_by_action("create", None).await.unwrap();
         assert_eq!(create_entries.len(), 2);
@@ -521,12 +543,18 @@ mod tests {
         let two_hours_ago = now - chrono::Duration::hours(2);
 
         // Log some entries
-        logger.log_action("create", "student", 123, 1, None).await.unwrap();
-        
+        logger
+            .log_action("create", "student", 123, 1, None)
+            .await
+            .unwrap();
+
         // Wait a tiny bit to ensure different timestamps
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        
-        logger.log_action("update", "student", 123, 1, None).await.unwrap();
+
+        logger
+            .log_action("update", "student", 123, 1, None)
+            .await
+            .unwrap();
 
         // Get all entries since 2 hours ago
         let entries_since = logger.get_entries_since(two_hours_ago, None).await.unwrap();
@@ -544,7 +572,10 @@ mod tests {
 
         // Create 15 audit entries
         for i in 0..15 {
-            logger.log_action("test", "object", i, 1, Some(&format!("Entry {}", i))).await.unwrap();
+            logger
+                .log_action("test", "object", i, 1, Some(&format!("Entry {}", i)))
+                .await
+                .unwrap();
         }
 
         // Test limit
@@ -568,7 +599,10 @@ mod tests {
 
         // Create some entries
         logger.log_action("old", "test", 1, 1, None).await.unwrap();
-        logger.log_action("recent", "test", 2, 1, None).await.unwrap();
+        logger
+            .log_action("recent", "test", 2, 1, None)
+            .await
+            .unwrap();
 
         let count_before = logger.count_entries().await.unwrap();
         assert_eq!(count_before, 2);
@@ -586,11 +620,17 @@ mod tests {
         let (logger, _temp_dir) = create_test_audit_logger().await;
 
         // Log some entries
-        logger.log_action("create", "student", 123, 1, None).await.unwrap();
-        
+        logger
+            .log_action("create", "student", 123, 1, None)
+            .await
+            .unwrap();
+
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        
-        logger.log_action("update", "student", 123, 1, None).await.unwrap();
+
+        logger
+            .log_action("update", "student", 123, 1, None)
+            .await
+            .unwrap();
 
         // Verify integrity (no backdated entries)
         let integrity_ok = logger.verify_integrity().await.unwrap();
@@ -620,18 +660,33 @@ mod tests {
         let (logger, _temp_dir) = create_test_audit_logger().await;
 
         // Create varied audit entries
-        logger.log_action("create", "student", 1, 1, None).await.unwrap();
-        logger.log_action("create", "student", 2, 1, None).await.unwrap();
-        logger.log_action("update", "student", 1, 1, None).await.unwrap();
-        logger.log_action("delete", "student", 2, 1, None).await.unwrap();
-        logger.log_action("export", "data", 1, 1, None).await.unwrap();
+        logger
+            .log_action("create", "student", 1, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("create", "student", 2, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("update", "student", 1, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("delete", "student", 2, 1, None)
+            .await
+            .unwrap();
+        logger
+            .log_action("export", "data", 1, 1, None)
+            .await
+            .unwrap();
 
         let stats = logger.get_statistics().await.unwrap();
-        
+
         assert_eq!(stats.total_entries, 5);
         assert!(stats.oldest_entry.is_some());
         assert!(stats.newest_entry.is_some());
-        
+
         // Check action statistics
         assert_eq!(stats.action_statistics.get("create").unwrap(), &2);
         assert_eq!(stats.action_statistics.get("update").unwrap(), &1);
@@ -650,14 +705,23 @@ mod tests {
             "reason": "Marriage"
         });
 
-        logger.log_action("update", "student", 123, 1, Some(&complex_details.to_string())).await.unwrap();
+        logger
+            .log_action(
+                "update",
+                "student",
+                123,
+                1,
+                Some(&complex_details.to_string()),
+            )
+            .await
+            .unwrap();
 
         let entries = logger.get_entries_for_object("student", 123).await.unwrap();
         assert_eq!(entries.len(), 1);
-        
+
         let entry = &entries[0];
         assert!(entry.details.is_some());
-        
+
         let details = entry.details.as_ref().unwrap();
         assert_eq!(details["field"], "last_name");
         assert_eq!(details["reason"], "Marriage");
@@ -668,19 +732,49 @@ mod tests {
         let (logger, _temp_dir) = create_test_audit_logger().await;
 
         // Simulate GDPR data subject request
-        logger.log_action("export", "student_data", 123, 1, Some("GDPR Article 15 request")).await.unwrap();
-        
+        logger
+            .log_action(
+                "export",
+                "student_data",
+                123,
+                1,
+                Some("GDPR Article 15 request"),
+            )
+            .await
+            .unwrap();
+
         // Simulate right to rectification
-        logger.log_action("update", "student", 123, 1, Some("GDPR Article 16 correction")).await.unwrap();
-        
+        logger
+            .log_action(
+                "update",
+                "student",
+                123,
+                1,
+                Some("GDPR Article 16 correction"),
+            )
+            .await
+            .unwrap();
+
         // Simulate right to erasure
-        logger.log_action("delete", "student", 123, 1, Some("GDPR Article 17 right to be forgotten")).await.unwrap();
+        logger
+            .log_action(
+                "delete",
+                "student",
+                123,
+                1,
+                Some("GDPR Article 17 right to be forgotten"),
+            )
+            .await
+            .unwrap();
 
         // Verify all GDPR actions are logged
         let gdpr_entries = logger.get_entries_for_object("student", 123).await.unwrap();
         assert_eq!(gdpr_entries.len(), 2); // export targets student_data, not student
 
-        let export_entries = logger.get_entries_for_object("student_data", 123).await.unwrap();
+        let export_entries = logger
+            .get_entries_for_object("student_data", 123)
+            .await
+            .unwrap();
         assert_eq!(export_entries.len(), 1);
 
         // Verify audit trail shows complete GDPR compliance
@@ -688,9 +782,12 @@ mod tests {
         assert_eq!(all_entries.len(), 3);
 
         // Check that we can trace the complete lifecycle
-        let lifecycle = all_entries.iter()
-            .filter(|e| (e.object_type == "student" && e.object_id == 123) || 
-                       (e.object_type == "student_data" && e.object_id == 123))
+        let lifecycle = all_entries
+            .iter()
+            .filter(|e| {
+                (e.object_type == "student" && e.object_id == 123)
+                    || (e.object_type == "student_data" && e.object_id == 123)
+            })
             .collect::<Vec<_>>();
         assert_eq!(lifecycle.len(), 3);
     }

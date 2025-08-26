@@ -39,12 +39,12 @@ ${StrLoc}
 !define SIDEBARIMAGE ""
 !define HEADERIMAGE ""
 !define MAINBINARYNAME "schuelerbeobachtung"
-!define MAINBINARYSRCPATH "C:\Users\Klaus\Documents\GH\DSGVO\src-tauri\target\release\schuelerbeobachtung.exe"
+!define MAINBINARYSRCPATH "C:\Users\klaus\Documents\GH\DSGVO\src-tauri\target\release\schuelerbeobachtung.exe"
 !define BUNDLEID "com.school.schuelerbeobachtung"
 !define COPYRIGHT ""
 !define OUTFILE "nsis-output.exe"
 !define ARCH "x64"
-!define ADDITIONALPLUGINSPATH "C:\Users\Klaus\AppData\Local\tauri\NSIS\Plugins\x86-unicode\additional"
+!define ADDITIONALPLUGINSPATH "C:\Users\klaus\AppData\Local\tauri\NSIS\Plugins\x86-unicode\additional"
 !define ALLOWDOWNGRADES "true"
 !define DISPLAYLANGUAGESELECTOR "false"
 !define INSTALLWEBVIEW2MODE "downloadBootstrapper"
@@ -56,7 +56,7 @@ ${StrLoc}
 !define MANUKEY "Software\${MANUFACTURER}"
 !define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
 !define UNINSTALLERSIGNCOMMAND ""
-!define ESTIMATEDSIZE "17675"
+!define ESTIMATEDSIZE "18073"
 !define STARTMENUFOLDER ""
 
 Var PassiveMode
@@ -441,7 +441,7 @@ FunctionEnd
 ;Languages
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_RESERVEFILE_LANGDLL
-  !include "C:\Users\Klaus\Documents\GH\DSGVO\src-tauri\target\release\nsis\x64\English.nsh"
+  !include "C:\Users\klaus\Documents\GH\DSGVO\src-tauri\target\release\nsis\x64\English.nsh"
 
 Function .onInit
   ${GetOptions} $CMDLINE "/P" $PassiveMode

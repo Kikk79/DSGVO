@@ -105,7 +105,7 @@ impl CryptoManager {
     pub fn generate_checksum(&self, data: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         data.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
@@ -140,9 +140,20 @@ impl CryptoManager {
     pub fn get_encryption_status(&self) -> HashMap<String, serde_json::Value> {
         let mut status = HashMap::new();
         status.insert("enabled".to_string(), serde_json::Value::Bool(false));
-        status.insert("algorithm".to_string(), serde_json::Value::String("none".to_string()));
-        status.insert("key_storage".to_string(), serde_json::Value::String("file".to_string()));
-        status.insert("warning".to_string(), serde_json::Value::String("Encryption is disabled - data stored in plaintext".to_string()));
+        status.insert(
+            "algorithm".to_string(),
+            serde_json::Value::String("none".to_string()),
+        );
+        status.insert(
+            "key_storage".to_string(),
+            serde_json::Value::String("file".to_string()),
+        );
+        status.insert(
+            "warning".to_string(),
+            serde_json::Value::String(
+                "Encryption is disabled - data stored in plaintext".to_string(),
+            ),
+        );
         status
     }
 
@@ -152,12 +163,12 @@ impl CryptoManager {
         config.insert("device_id".to_string(), self.device_id.clone());
         config.insert("encryption_enabled".to_string(), "false".to_string());
         config.insert("key_storage".to_string(), "file".to_string());
-        
+
         // Try to load additional device info
         if let Ok(Some(device_type)) = secret_get("device_type") {
             config.insert("device_type".to_string(), device_type);
         }
-        
+
         if let Ok(Some(device_name)) = secret_get("device_name") {
             config.insert("device_name".to_string(), device_name);
         }
@@ -165,11 +176,15 @@ impl CryptoManager {
         Ok(config)
     }
 
-    pub fn set_device_config(&self, device_type: Option<String>, device_name: Option<String>) -> Result<()> {
+    pub fn set_device_config(
+        &self,
+        device_type: Option<String>,
+        device_name: Option<String>,
+    ) -> Result<()> {
         if let Some(dt) = device_type {
             secret_set("device_type", &dt)?;
         }
-        
+
         if let Some(dn) = device_name {
             secret_set("device_name", &dn)?;
         }
@@ -183,11 +198,11 @@ impl CryptoManager {
         // 1. Generate new encryption key
         // 2. Re-encrypt all data with new key
         // 3. Update key storage
-        
+
         // For now, just update device ID as a form of "rotation"
         let new_device_id = Uuid::new_v4().to_string();
         secret_set("device_id", &new_device_id)?;
-        
+
         Ok(())
     }
 
@@ -196,11 +211,11 @@ impl CryptoManager {
         let mut config = HashMap::new();
         config.insert("device_id".to_string(), self.device_id.clone());
         config.insert("encryption_enabled".to_string(), "false".to_string());
-        
+
         if let Ok(Some(device_type)) = secret_get("device_type") {
             config.insert("device_type".to_string(), device_type);
         }
-        
+
         if let Ok(Some(device_name)) = secret_get("device_name") {
             config.insert("device_name".to_string(), device_name);
         }
@@ -235,8 +250,8 @@ impl Default for CryptoManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::env;
+    use tempfile::TempDir;
 
     fn setup_test_env() -> TempDir {
         let temp_dir = TempDir::new().unwrap();
@@ -248,7 +263,7 @@ mod tests {
     #[test]
     fn test_new_crypto_manager() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
         assert!(!crypto.device_id.is_empty());
         assert!(crypto.device_id.len() == 36); // UUID length
@@ -257,7 +272,7 @@ mod tests {
     #[test]
     fn test_device_id_persistence() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto1 = CryptoManager::new().unwrap();
         let device_id1 = crypto1.get_device_id();
 
@@ -270,12 +285,12 @@ mod tests {
     #[test]
     fn test_encryption_disabled() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
         assert!(!crypto.is_encryption_enabled());
 
         let plaintext = "This is sensitive data";
-        
+
         // Encryption should return the same text
         let encrypted = crypto.encrypt(plaintext).unwrap();
         assert_eq!(encrypted, plaintext);
@@ -288,7 +303,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_bytes() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
         let original_data = b"Binary data for testing";
 
@@ -302,17 +317,17 @@ mod tests {
     #[test]
     fn test_checksum_generation() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
         let data = "Test data for checksum";
-        
+
         let checksum1 = crypto.generate_checksum(data);
         let checksum2 = crypto.generate_checksum(data);
-        
+
         // Same data should produce same checksum
         assert_eq!(checksum1, checksum2);
         assert_eq!(checksum1.len(), 16); // 64-bit hash as hex
-        
+
         // Different data should produce different checksum
         let different_data = "Different test data";
         let different_checksum = crypto.generate_checksum(different_data);
@@ -322,19 +337,19 @@ mod tests {
     #[test]
     fn test_checksum_verification() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
         let data = "Test data for verification";
-        
+
         let checksum = crypto.generate_checksum(data);
-        
+
         // Valid checksum should verify
         assert!(crypto.verify_checksum(data, &checksum));
-        
+
         // Invalid checksum should not verify
         let wrong_checksum = "0000000000000000";
         assert!(!crypto.verify_checksum(data, wrong_checksum));
-        
+
         // Modified data should not verify with original checksum
         let modified_data = "Modified test data";
         assert!(!crypto.verify_checksum(modified_data, &checksum));
@@ -343,28 +358,47 @@ mod tests {
     #[test]
     fn test_get_encryption_status() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
         let status = crypto.get_encryption_status();
-        
-        assert_eq!(status.get("enabled").unwrap(), &serde_json::Value::Bool(false));
-        assert_eq!(status.get("algorithm").unwrap(), &serde_json::Value::String("none".to_string()));
-        assert_eq!(status.get("key_storage").unwrap(), &serde_json::Value::String("file".to_string()));
-        assert!(status.get("warning").unwrap().as_str().unwrap().contains("disabled"));
+
+        assert_eq!(
+            status.get("enabled").unwrap(),
+            &serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            status.get("algorithm").unwrap(),
+            &serde_json::Value::String("none".to_string())
+        );
+        assert_eq!(
+            status.get("key_storage").unwrap(),
+            &serde_json::Value::String("file".to_string())
+        );
+        assert!(status
+            .get("warning")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("disabled"));
     }
 
     #[test]
     fn test_device_config() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
-        
+
         // Set device config
-        crypto.set_device_config(Some("laptop".to_string()), Some("Teacher's Laptop".to_string())).unwrap();
-        
+        crypto
+            .set_device_config(
+                Some("laptop".to_string()),
+                Some("Teacher's Laptop".to_string()),
+            )
+            .unwrap();
+
         // Get device config
         let config = crypto.get_device_config().unwrap();
-        
+
         assert_eq!(config.get("device_type").unwrap(), "laptop");
         assert_eq!(config.get("device_name").unwrap(), "Teacher's Laptop");
         assert_eq!(config.get("encryption_enabled").unwrap(), "false");
@@ -374,45 +408,50 @@ mod tests {
     #[test]
     fn test_key_rotation() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
         let original_device_id = crypto.get_device_id();
-        
+
         crypto.rotate_keys().unwrap();
-        
+
         // Create new crypto manager to see if device ID changed
         let crypto2 = CryptoManager::new().unwrap();
         let new_device_id = crypto2.get_device_id();
-        
+
         assert_ne!(original_device_id, new_device_id);
     }
 
     #[test]
     fn test_export_import_crypto_config() {
         let _temp_dir = setup_test_env();
-        
+
         let mut crypto = CryptoManager::new().unwrap();
-        
+
         // Set some config
-        crypto.set_device_config(Some("desktop".to_string()), Some("Main Computer".to_string())).unwrap();
+        crypto
+            .set_device_config(
+                Some("desktop".to_string()),
+                Some("Main Computer".to_string()),
+            )
+            .unwrap();
         let original_device_id = crypto.get_device_id();
-        
+
         // Export config
         let exported_config = crypto.export_crypto_config().unwrap();
-        
+
         // Reset device ID
         CryptoManager::reset_device_id().unwrap();
-        
+
         // Create new crypto manager (should have different device ID)
         let mut crypto2 = CryptoManager::new().unwrap();
         assert_ne!(crypto2.get_device_id(), original_device_id);
-        
+
         // Import config
         crypto2.import_crypto_config(&exported_config).unwrap();
-        
+
         // Check if config was restored
         assert_eq!(crypto2.get_device_id(), original_device_id);
-        
+
         let restored_config = crypto2.get_device_config().unwrap();
         assert_eq!(restored_config.get("device_type").unwrap(), "desktop");
         assert_eq!(restored_config.get("device_name").unwrap(), "Main Computer");
@@ -421,16 +460,16 @@ mod tests {
     #[test]
     fn test_secrets_file_operations() {
         let _temp_dir = setup_test_env();
-        
+
         // Test secret storage
         secret_set("test_key", "test_value").unwrap();
         let retrieved = secret_get("test_key").unwrap();
         assert_eq!(retrieved, Some("test_value".to_string()));
-        
+
         // Test non-existent key
         let non_existent = secret_get("non_existent_key").unwrap();
         assert_eq!(non_existent, None);
-        
+
         // Test overwriting
         secret_set("test_key", "new_value").unwrap();
         let updated = secret_get("test_key").unwrap();
@@ -440,7 +479,7 @@ mod tests {
     #[test]
     fn test_data_directory_creation() {
         let _temp_dir = setup_test_env();
-        
+
         let data_path = data_dir().unwrap();
         assert!(data_path.exists());
         assert!(data_path.is_dir());
@@ -449,45 +488,45 @@ mod tests {
     #[test]
     fn test_secrets_file_persistence() {
         let _temp_dir = setup_test_env();
-        
+
         // Save a secret
         secret_set("persistent_key", "persistent_value").unwrap();
-        
+
         // Load secrets manually to verify file persistence
         let secrets = load_secrets();
         assert_eq!(secrets.get("persistent_key").unwrap(), "persistent_value");
-        
+
         // Verify the file exists
         let secrets_path = secrets_file().unwrap();
         assert!(secrets_path.exists());
     }
 
-    #[test] 
+    #[test]
     fn test_device_id_reset() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto1 = CryptoManager::new().unwrap();
         let original_id = crypto1.get_device_id();
-        
+
         // Reset device ID
         CryptoManager::reset_device_id().unwrap();
-        
+
         let crypto2 = CryptoManager::new().unwrap();
         let new_id = crypto2.get_device_id();
-        
+
         assert_ne!(original_id, new_id);
     }
 
     #[test]
     fn test_manual_device_id_setting() {
         let _temp_dir = setup_test_env();
-        
+
         let mut crypto = CryptoManager::new().unwrap();
         let custom_id = "custom-device-id-123";
-        
+
         crypto.set_device_id(custom_id.to_string()).unwrap();
         assert_eq!(crypto.get_device_id(), custom_id);
-        
+
         // Verify persistence
         let crypto2 = CryptoManager::new().unwrap();
         assert_eq!(crypto2.get_device_id(), custom_id);
@@ -496,15 +535,15 @@ mod tests {
     #[test]
     fn test_large_data_encryption() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
-        
+
         // Test with large text data
         let large_text = "A".repeat(10000);
         let encrypted = crypto.encrypt(&large_text).unwrap();
         let decrypted = crypto.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, large_text);
-        
+
         // Test with large binary data
         let large_binary = vec![0x42; 10000];
         let encrypted_bytes = crypto.encrypt_bytes(&large_binary).unwrap();
@@ -515,14 +554,14 @@ mod tests {
     #[test]
     fn test_special_characters_in_data() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = CryptoManager::new().unwrap();
-        
+
         let special_text = "Hello 世界! 🌍 Special chars: àáâãäåæçèéêë ñ øþð";
         let encrypted = crypto.encrypt(special_text).unwrap();
         let decrypted = crypto.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, special_text);
-        
+
         // Test checksum with special characters
         let checksum = crypto.generate_checksum(special_text);
         assert!(crypto.verify_checksum(special_text, &checksum));
@@ -531,10 +570,10 @@ mod tests {
     #[test]
     fn test_concurrent_crypto_operations() {
         let _temp_dir = setup_test_env();
-        
+
         let crypto = std::sync::Arc::new(CryptoManager::new().unwrap());
         let mut handles = vec![];
-        
+
         // Test concurrent encryption operations
         for i in 0..10 {
             let crypto_clone = crypto.clone();
@@ -546,7 +585,7 @@ mod tests {
             });
             handles.push(handle);
         }
-        
+
         // Wait for all threads to complete
         for handle in handles {
             handle.join().unwrap();
@@ -556,17 +595,17 @@ mod tests {
     #[test]
     fn test_error_handling() {
         let _temp_dir = setup_test_env();
-        
+
         // Test with invalid path
         env::set_var("HOME", "/invalid/path/that/should/not/exist");
-        
+
         // Should still work due to fallback handling
         let crypto = CryptoManager::new();
-        
+
         // Reset to valid path
         let temp_dir = TempDir::new().unwrap();
         env::set_var("HOME", temp_dir.path());
-        
+
         assert!(crypto.is_ok());
     }
 }

@@ -1,5 +1,5 @@
 use crate::crypto::CryptoManager;
-use crate::{Class, Observation, Student};
+use crate::{AssessmentRecord, CalendarObservation, Category, Class, Observation, Student, StudentWithStats};
 use anyhow::{Context, Result};
 // use chrono::Utc; // Temporarily unused
 use sha2::{Digest, Sha256};
@@ -168,7 +168,7 @@ impl Database {
 
         // Migrate existing tables to add source_device_id columns if they don't exist
         self.add_missing_columns().await?;
-        
+
         // Seed default categories if none exist
         self.seed_default_categories().await?;
 
@@ -357,6 +357,163 @@ impl Database {
         Ok(students)
     }
 
+    pub async fn get_all_students_including_deleted(&self) -> Result<Vec<Student>> {
+        let students =
+            sqlx::query_as::<_, Student>("SELECT * FROM students ORDER BY last_name, first_name")
+                .fetch_all(&self.pool)
+                .await
+                .context("Failed to fetch all students")?;
+
+        Ok(students)
+    }
+
+    pub async fn get_students_with_stats(&self) -> Result<Vec<StudentWithStats>> {
+        let students_with_stats = sqlx::query_as::<_, StudentWithStats>(
+            r#"
+            SELECT 
+                s.id,
+                s.first_name,
+                s.last_name,
+                c.name as class_name,
+                s.class_id,
+                s.status,
+                COALESCE(obs_stats.observation_count, 0) as observation_count,
+                obs_stats.last_observation_date
+            FROM students s
+            LEFT JOIN classes c ON s.class_id = c.id
+            LEFT JOIN (
+                SELECT 
+                    student_id,
+                    COUNT(*) as observation_count,
+                    MAX(created_at) as last_observation_date
+                FROM observations
+                GROUP BY student_id
+            ) obs_stats ON s.id = obs_stats.student_id
+            WHERE s.status != 'deleted'
+            ORDER BY s.last_name, s.first_name
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to fetch students with stats")?;
+
+        Ok(students_with_stats)
+    }
+
+    pub async fn get_assessments_comprehensive(
+        &self,
+        limit: i64,
+        offset: i64,
+        sort_field: String,
+        sort_direction: String,
+        date_from: Option<String>,
+        date_to: Option<String>,
+        category_filter: Option<String>,
+        class_filter: Option<String>,
+        student_filter: Option<String>,
+    ) -> Result<Vec<AssessmentRecord>> {
+        let mut sql = r#"
+            SELECT 
+                o.id as observation_id,
+                o.created_at as observation_created_at,
+                o.updated_at as observation_updated_at,
+                o.student_id,
+                s.first_name as student_first_name,
+                s.last_name as student_last_name,
+                s.class_id,
+                c.name as class_name,
+                o.category,
+                COALESCE(cat.color, '#6B7280') as category_color,
+                COALESCE(cat.background_color, '#F3F4F6') as category_background_color,
+                COALESCE(cat.text_color, '#374151') as category_text_color,
+                o.text,
+                o.tags,
+                o.author_id,
+                o.source_device_id
+            FROM observations o
+            LEFT JOIN students s ON o.student_id = s.id
+            LEFT JOIN classes c ON s.class_id = c.id
+            LEFT JOIN categories cat ON o.category = cat.name
+            WHERE s.status != 'deleted'
+        "#.to_string();
+
+        let mut bind_values: Vec<String> = Vec::new();
+
+        // Add date filters
+        if let Some(date_from) = date_from {
+            sql.push_str(" AND o.created_at >= ?");
+            bind_values.push(date_from);
+        }
+        if let Some(date_to) = date_to {
+            sql.push_str(" AND o.created_at <= ?");
+            bind_values.push(date_to);
+        }
+
+        // Add category filter
+        if let Some(category_filter) = category_filter.as_ref() {
+            if !category_filter.is_empty() {
+                sql.push_str(" AND o.category = ?");
+                bind_values.push(category_filter.clone());
+            }
+        }
+
+        // Add class filter
+        if let Some(class_filter) = class_filter.as_ref() {
+            if !class_filter.is_empty() {
+                sql.push_str(" AND c.name = ?");
+                bind_values.push(class_filter.clone());
+            }
+        }
+
+        // Add student filter (searches in first_name and last_name)
+        if let Some(student_filter) = student_filter.as_ref() {
+            if !student_filter.is_empty() {
+                sql.push_str(" AND (s.first_name LIKE ? OR s.last_name LIKE ?)");
+                let search_term = format!("%{}%", student_filter);
+                bind_values.push(search_term.clone());
+                bind_values.push(search_term);
+            }
+        }
+
+        // Add sorting
+        let sort_field_sql = match sort_field.as_str() {
+            "student_name" => "s.last_name, s.first_name",
+            "student_first_name" => "s.first_name",
+            "student_last_name" => "s.last_name",
+            "class_name" => "c.name",
+            "category" => "o.category",
+            "observation_created_at" => "o.created_at",
+            "observation_updated_at" => "o.updated_at",
+            _ => "o.created_at", // Default fallback
+        };
+
+        let sort_dir = if sort_direction.to_lowercase() == "asc" {
+            "ASC"
+        } else {
+            "DESC"
+        };
+
+        sql.push_str(&format!(" ORDER BY {} {}", sort_field_sql, sort_dir));
+
+        // Add pagination
+        sql.push_str(" LIMIT ? OFFSET ?");
+        bind_values.push(limit.to_string());
+        bind_values.push(offset.to_string());
+
+        // Build and execute query
+        let mut query = sqlx::query_as::<_, AssessmentRecord>(&sql);
+        for value in bind_values {
+            query = query.bind(value);
+        }
+
+        let assessments = query
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to fetch comprehensive assessments")?;
+
+        Ok(assessments)
+    }
+
     pub async fn delete_student(&self, student_id: i64, force_delete: bool) -> Result<()> {
         if force_delete {
             // Hard delete: remove student and all observations
@@ -413,13 +570,12 @@ impl Database {
     }
 
     pub async fn get_observation(&self, observation_id: i64) -> Result<Option<Observation>> {
-        let observation = sqlx::query_as::<_, Observation>(
-            "SELECT * FROM observations WHERE id = ?",
-        )
-        .bind(observation_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("Failed to fetch observation")?;
+        let observation =
+            sqlx::query_as::<_, Observation>("SELECT * FROM observations WHERE id = ?")
+                .bind(observation_id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("Failed to fetch observation")?;
 
         Ok(observation)
     }
@@ -451,7 +607,7 @@ impl Database {
         sql.push_str(" ORDER BY created_at DESC");
 
         let mut query_builder = sqlx::query_as::<_, Observation>(&sql);
-        
+
         for param in params {
             query_builder = query_builder.bind(param);
         }
@@ -464,7 +620,10 @@ impl Database {
         Ok(observations)
     }
 
-    pub async fn get_observations_since(&self, since: chrono::DateTime<chrono::Utc>) -> Result<Vec<Observation>> {
+    pub async fn get_observations_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Observation>> {
         let observations = sqlx::query_as::<_, Observation>(
             "SELECT * FROM observations WHERE created_at >= ? ORDER BY created_at DESC",
         )
@@ -472,6 +631,68 @@ impl Database {
         .fetch_all(&self.pool)
         .await
         .context("Failed to fetch observations since timestamp")?;
+
+        Ok(observations)
+    }
+
+    pub async fn get_calendar_observations(
+        &self,
+        start_date: chrono::DateTime<chrono::Utc>,
+        end_date: chrono::DateTime<chrono::Utc>,
+        class_id: Option<i64>,
+        category: Option<String>,
+    ) -> Result<Vec<CalendarObservation>> {
+        let mut query = r#"
+            SELECT 
+                o.id,
+                o.created_at,
+                o.student_id,
+                s.first_name as student_first_name,
+                s.last_name as student_last_name,
+                s.class_id,
+                c.name as class_name,
+                o.category,
+                COALESCE(cat.color, '#3B82F6') as category_color,
+                COALESCE(cat.background_color, '#EBF8FF') as category_background_color,
+                COALESCE(cat.text_color, '#1E3A8A') as category_text_color,
+                o.text,
+                o.tags
+            FROM observations o
+            LEFT JOIN students s ON o.student_id = s.id
+            LEFT JOIN classes c ON s.class_id = c.id
+            LEFT JOIN categories cat ON o.category = cat.name
+            WHERE o.created_at BETWEEN ? AND ?
+              AND s.status = 'active'
+        "#.to_string();
+
+        // Build query dynamically based on filters
+        if class_id.is_some() {
+            query.push_str(" AND s.class_id = ?");
+        }
+
+        if category.is_some() {
+            query.push_str(" AND o.category = ?");
+        }
+
+        query.push_str(" ORDER BY o.created_at DESC");
+
+        // Build the query with parameters
+        let mut query_builder = sqlx::query_as::<_, CalendarObservation>(&query)
+            .bind(start_date)
+            .bind(end_date);
+
+        if let Some(class_id) = class_id {
+            query_builder = query_builder.bind(class_id);
+        }
+
+        if let Some(category) = category {
+            query_builder = query_builder.bind(category);
+        }
+
+        let observations = query_builder
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to fetch calendar observations")?;
 
         Ok(observations)
     }
@@ -538,7 +759,7 @@ impl Database {
         let cutoff_date = chrono::Utc::now() - chrono::Duration::days(days_back as i64);
 
         let recent_observations = self.get_observations_since(cutoff_date).await?;
-        
+
         let changeset = serde_json::json!({
             "format": "changeset_file_v1",
             "version": "1.0",
@@ -568,15 +789,17 @@ impl Database {
         let content = String::from_utf8(changeset_data.to_vec())
             .context("Invalid changeset file encoding")?;
 
-        let parsed: serde_json::Value = serde_json::from_str(&content)
-            .context("Invalid changeset file format")?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).context("Invalid changeset file format")?;
 
         // Verify checksum
-        let stored_checksum = parsed.get("checksum")
+        let stored_checksum = parsed
+            .get("checksum")
             .and_then(|c| c.as_str())
             .context("Missing checksum in changeset file")?;
 
-        let data_section = parsed.get("data")
+        let data_section = parsed
+            .get("data")
             .context("Missing data section in changeset file")?;
 
         let data_content = data_section.to_string();
@@ -589,7 +812,8 @@ impl Database {
         }
 
         // Extract observations and merge them
-        let observations_data = data_section.get("changes")
+        let observations_data = data_section
+            .get("changes")
             .and_then(|c| c.get("observations"))
             .and_then(|o| o.as_array())
             .context("Invalid observations data in changeset")?;
@@ -598,12 +822,11 @@ impl Database {
         for obs_value in observations_data {
             if let Ok(obs) = serde_json::from_value::<Observation>(obs_value.clone()) {
                 // Check if observation already exists
-                let exists = sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM observations WHERE id = ?",
-                )
-                .bind(obs.id)
-                .fetch_one(&self.pool)
-                .await?;
+                let exists =
+                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM observations WHERE id = ?")
+                        .bind(obs.id)
+                        .fetch_one(&self.pool)
+                        .await?;
 
                 if exists == 0 {
                     // Insert new observation (preserving original ID and timestamps)
@@ -630,30 +853,36 @@ impl Database {
             }
         }
 
-        Ok(format!("Successfully imported {} observations", imported_count))
+        Ok(format!(
+            "Successfully imported {} observations",
+            imported_count
+        ))
     }
 
     pub async fn import_full_backup(&self, backup_data: &[u8]) -> Result<String> {
-        let content = String::from_utf8(backup_data.to_vec())
-            .context("Invalid backup file encoding")?;
+        let content =
+            String::from_utf8(backup_data.to_vec()).context("Invalid backup file encoding")?;
 
-        let parsed: serde_json::Value = serde_json::from_str(&content)
-            .context("Invalid backup file format")?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).context("Invalid backup file format")?;
 
         let mut imported_students = 0;
         let mut imported_classes = 0;
         let mut imported_observations = 0;
 
         // Import classes first (due to foreign key constraints)
-        if let Some(classes_data) = parsed.get("data").and_then(|d| d.get("classes")).and_then(|c| c.as_array()) {
+        if let Some(classes_data) = parsed
+            .get("data")
+            .and_then(|d| d.get("classes"))
+            .and_then(|c| c.as_array())
+        {
             for class_value in classes_data {
                 if let Ok(class) = serde_json::from_value::<Class>(class_value.clone()) {
-                    let exists = sqlx::query_scalar::<_, i64>(
-                        "SELECT COUNT(*) FROM classes WHERE id = ?",
-                    )
-                    .bind(class.id)
-                    .fetch_one(&self.pool)
-                    .await?;
+                    let exists =
+                        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM classes WHERE id = ?")
+                            .bind(class.id)
+                            .fetch_one(&self.pool)
+                            .await?;
 
                     if exists == 0 {
                         sqlx::query(
@@ -675,17 +904,21 @@ impl Database {
         }
 
         // Import students
-        if let Some(students_data) = parsed.get("data").and_then(|d| d.get("students")).and_then(|s| s.as_array()) {
+        if let Some(students_data) = parsed
+            .get("data")
+            .and_then(|d| d.get("students"))
+            .and_then(|s| s.as_array())
+        {
             for student_value in students_data {
                 if let Ok(student) = serde_json::from_value::<Student>(student_value.clone()) {
-                    let exists = sqlx::query_scalar::<_, i64>(
-                        "SELECT COUNT(*) FROM students WHERE id = ?",
-                    )
-                    .bind(student.id)
-                    .fetch_one(&self.pool)
-                    .await?;
+                    let exists =
+                        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE id = ?")
+                            .bind(student.id)
+                            .fetch_one(&self.pool)
+                            .await?;
 
                     if exists == 0 {
+                        // Student doesn't exist - insert new student
                         sqlx::query(
                             "INSERT INTO students (id, class_id, first_name, last_name, status, created_at, updated_at, source_device_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         )
@@ -701,13 +934,58 @@ impl Database {
                         .await?;
 
                         imported_students += 1;
+                    } else {
+                        // Student exists - check if it's deleted and needs reactivation
+                        let current_status = sqlx::query_scalar::<_, String>(
+                            "SELECT status FROM students WHERE id = ?",
+                        )
+                        .bind(student.id)
+                        .fetch_one(&self.pool)
+                        .await?;
+
+                        if current_status == "deleted" && student.status != "deleted" {
+                            // Reactivate deleted student by updating all fields
+                            sqlx::query(
+                                "UPDATE students SET class_id = ?, first_name = ?, last_name = ?, status = ?, updated_at = ?, source_device_id = ? WHERE id = ?",
+                            )
+                            .bind(student.class_id)
+                            .bind(student.first_name)
+                            .bind(student.last_name)
+                            .bind(student.status)
+                            .bind(student.updated_at)
+                            .bind(student.source_device_id)
+                            .bind(student.id)
+                            .execute(&self.pool)
+                            .await?;
+
+                            imported_students += 1;
+                        } else if student.status == "active" {
+                            // Update existing active student with new data
+                            sqlx::query(
+                                "UPDATE students SET class_id = ?, first_name = ?, last_name = ?, updated_at = ?, source_device_id = ? WHERE id = ?",
+                            )
+                            .bind(student.class_id)
+                            .bind(student.first_name)
+                            .bind(student.last_name)
+                            .bind(student.updated_at)
+                            .bind(student.source_device_id)
+                            .bind(student.id)
+                            .execute(&self.pool)
+                            .await?;
+
+                            imported_students += 1;
+                        }
                     }
                 }
             }
         }
 
         // Import observations
-        if let Some(observations_data) = parsed.get("data").and_then(|d| d.get("observations")).and_then(|o| o.as_array()) {
+        if let Some(observations_data) = parsed
+            .get("data")
+            .and_then(|d| d.get("observations"))
+            .and_then(|o| o.as_array())
+        {
             for obs_value in observations_data {
                 if let Ok(obs) = serde_json::from_value::<Observation>(obs_value.clone()) {
                     let exists = sqlx::query_scalar::<_, i64>(
@@ -739,9 +1017,24 @@ impl Database {
             }
         }
 
+        // Import categories
+        let mut imported_categories = 0;
+        if let Some(categories_data) = parsed
+            .get("data")
+            .and_then(|d| d.get("categories"))
+            .and_then(|c| c.as_array())
+        {
+            imported_categories = self.import_categories_with_merge(categories_data).await?;
+        }
+
+        // Import device config
+        if let Some(device_config) = parsed.get("device_config") {
+            self.import_device_config(device_config).await?;
+        }
+
         Ok(format!(
-            "Successfully imported {} classes, {} students, {} observations",
-            imported_classes, imported_students, imported_observations
+            "Successfully imported {} classes, {} students, {} observations, {} categories",
+            imported_classes, imported_students, imported_observations, imported_categories
         ))
     }
 
@@ -756,11 +1049,11 @@ impl Database {
         }
 
         let device_id = self.crypto.get_device_id();
-        
+
         // Default categories with appealing colors
         let default_categories = vec![
             ("Sozial", "#10B981", "#D1FAE5", "#065F46", 1), // Green theme
-            ("Fachlich", "#3B82F6", "#DBEAFE", "#1E3A8A", 2), // Blue theme  
+            ("Fachlich", "#3B82F6", "#DBEAFE", "#1E3A8A", 2), // Blue theme
             ("Verhalten", "#F59E0B", "#FEF3C7", "#92400E", 3), // Amber theme
             ("Förderung", "#8B5CF6", "#EDE9FE", "#5B21B6", 4), // Purple theme
             ("Sonstiges", "#6B7280", "#F3F4F6", "#374151", 5), // Gray theme
@@ -777,7 +1070,7 @@ impl Database {
             )
             .bind(name)
             .bind(color)
-            .bind(bg_color) 
+            .bind(bg_color)
             .bind(text_color)
             .bind(true)
             .bind(sort_order)
@@ -793,7 +1086,7 @@ impl Database {
     // Category CRUD operations
     pub async fn get_categories(&self) -> Result<Vec<crate::Category>> {
         let categories = sqlx::query_as::<_, crate::Category>(
-            "SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order ASC"
+            "SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -801,14 +1094,21 @@ impl Database {
         Ok(categories)
     }
 
-    pub async fn create_category(&self, name: String, color: String, background_color: String, text_color: String) -> Result<crate::Category> {
+    pub async fn create_category(
+        &self,
+        name: String,
+        color: String,
+        background_color: String,
+        text_color: String,
+    ) -> Result<crate::Category> {
         let device_id = self.crypto.get_device_id();
-        
+
         // Get next sort order
-        let max_order: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), 0) FROM categories")
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or(0);
+        let max_order: i32 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), 0) FROM categories")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
 
         let category = sqlx::query_as::<_, crate::Category>(
             r#"
@@ -830,7 +1130,14 @@ impl Database {
         Ok(category)
     }
 
-    pub async fn update_category(&self, id: i64, name: String, color: String, background_color: String, text_color: String) -> Result<()> {
+    pub async fn update_category(
+        &self,
+        id: i64,
+        name: String,
+        color: String,
+        background_color: String,
+        text_color: String,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             UPDATE categories 
@@ -865,7 +1172,7 @@ impl Database {
                 return Ok(());
             }
         }
-        
+
         // Hard delete: remove completely
         sqlx::query("DELETE FROM categories WHERE id = ?")
             .bind(id)
@@ -875,10 +1182,119 @@ impl Database {
     }
 
     pub async fn clear_all_data(&self) -> Result<()> {
-        sqlx::query("DELETE FROM observations").execute(&self.pool).await?;
-        sqlx::query("DELETE FROM students").execute(&self.pool).await?;
-        sqlx::query("DELETE FROM classes").execute(&self.pool).await?;
-        sqlx::query("DELETE FROM categories").execute(&self.pool).await?;
+        sqlx::query("DELETE FROM observations")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM students")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM classes")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM categories")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn import_categories_with_merge(
+        &self,
+        categories_data: &[serde_json::Value],
+    ) -> Result<i32> {
+        let mut imported_count = 0;
+        let device_id = self.crypto.get_device_id();
+
+        for category_value in categories_data {
+            if let Ok(category) = serde_json::from_value::<Category>(category_value.clone()) {
+                // Check if category with same name exists
+                let existing_id: Option<i64> =
+                    sqlx::query_scalar("SELECT id FROM categories WHERE name = ?")
+                        .bind(&category.name)
+                        .fetch_optional(&self.pool)
+                        .await?;
+
+                if let Some(existing_id) = existing_id {
+                    // Update existing category with import data (merge colors/settings)
+                    sqlx::query(
+                        "UPDATE categories SET 
+                         color = ?, background_color = ?, text_color = ?, 
+                         is_active = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP,
+                         source_device_id = ?
+                         WHERE id = ?",
+                    )
+                    .bind(&category.color)
+                    .bind(&category.background_color)
+                    .bind(&category.text_color)
+                    .bind(category.is_active)
+                    .bind(category.sort_order)
+                    .bind(&device_id)
+                    .bind(existing_id)
+                    .execute(&self.pool)
+                    .await?;
+                } else {
+                    // Create new category
+                    sqlx::query(
+                        "INSERT INTO categories (name, color, background_color, text_color, is_active, sort_order, source_device_id) 
+                         VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    )
+                    .bind(&category.name)
+                    .bind(&category.color)
+                    .bind(&category.background_color)
+                    .bind(&category.text_color)
+                    .bind(category.is_active)
+                    .bind(category.sort_order)
+                    .bind(&device_id)
+                    .execute(&self.pool)
+                    .await?;
+
+                    imported_count += 1;
+                }
+            }
+        }
+
+        // Deactivate categories that exist locally but not in import (soft delete)
+        let import_category_names: Vec<String> = categories_data
+            .iter()
+            .filter_map(|v| {
+                v.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+
+        if !import_category_names.is_empty() {
+            let placeholders = import_category_names
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query = format!("UPDATE categories SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE name NOT IN ({})", placeholders);
+
+            let mut query_builder = sqlx::query(&query);
+            for name in import_category_names {
+                query_builder = query_builder.bind(name);
+            }
+            query_builder.execute(&self.pool).await?;
+        }
+
+        Ok(imported_count)
+    }
+
+    async fn import_device_config(&self, config: &serde_json::Value) -> Result<()> {
+        // Import device configuration (but keep current device_id)
+        let device_type = config
+            .get("device_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let device_name = config
+            .get("device_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Update device config in crypto manager, but preserve current device_id
+        // Note: We deliberately don't update device_id to keep each device unique
+        self.crypto.set_device_config(device_type, device_name)?;
+
         Ok(())
     }
 }
@@ -887,7 +1303,7 @@ impl Database {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    
+
     async fn create_test_db() -> (Database, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
@@ -901,7 +1317,10 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create a class
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
         assert_eq!(class.name, "5a");
         assert_eq!(class.school_year, "2023/24");
 
@@ -916,15 +1335,21 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create a class first
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
 
         // Create a student
-        let student = db.create_student(
-            class.id,
-            "Max".to_string(),
-            "Mustermann".to_string(),
-            Some("active".to_string()),
-        ).await.unwrap();
+        let student = db
+            .create_student(
+                class.id,
+                "Max".to_string(),
+                "Mustermann".to_string(),
+                Some("active".to_string()),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(student.first_name, "Max");
         assert_eq!(student.last_name, "Mustermann");
@@ -941,8 +1366,14 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create class and student
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
 
         // Soft delete student
         db.delete_student(student.id, false).await.unwrap();
@@ -957,17 +1388,26 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create class and student
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
 
         // Create observation for student
-        let _observation = db.create_observation(
-            student.id,
-            1,
-            "social".to_string(),
-            "Test observation".to_string(),
-            vec!["test".to_string()],
-        ).await.unwrap();
+        let _observation = db
+            .create_observation(
+                student.id,
+                1,
+                "social".to_string(),
+                "Test observation".to_string(),
+                vec!["test".to_string()],
+            )
+            .await
+            .unwrap();
 
         // Hard delete student
         db.delete_student(student.id, true).await.unwrap();
@@ -982,21 +1422,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_student_delete_and_restore_via_import() {
+        let (db, _temp_dir) = create_test_db().await;
+
+        // Create class and student
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
+
+        // Create observation for student
+        let observation = db
+            .create_observation(
+                student.id,
+                1,
+                "social".to_string(),
+                "Test observation".to_string(),
+                vec!["test".to_string()],
+            )
+            .await
+            .unwrap();
+
+        // Verify initial state
+        let students = db.get_students().await.unwrap();
+        assert_eq!(students.len(), 1);
+        let observations = db.search_observations(None, None, None).await.unwrap();
+        assert_eq!(observations.len(), 1);
+
+        // Create export before deletion (should include all students)
+        let all_students = db.get_all_students_including_deleted().await.unwrap();
+        assert_eq!(all_students.len(), 1);
+
+        let backup_json = serde_json::json!({
+            "format": "full_export",
+            "version": "1.1",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "data": {
+                "classes": [class],
+                "students": [student],
+                "observations": [observation]
+            }
+        });
+        let backup_data = backup_json.to_string().into_bytes();
+
+        // Soft delete student (should hide from regular queries)
+        db.delete_student(student.id, false).await.unwrap();
+
+        // Student should be hidden from regular queries
+        let students_after_soft = db.get_students().await.unwrap();
+        assert_eq!(students_after_soft.len(), 0);
+
+        // But should still exist in all_students query
+        let all_students_after_soft = db.get_all_students_including_deleted().await.unwrap();
+        assert_eq!(all_students_after_soft.len(), 1);
+        assert_eq!(all_students_after_soft[0].status, "deleted");
+
+        // Observations should still exist (soft delete preserves them)
+        let observations_after_soft = db.search_observations(None, None, None).await.unwrap();
+        assert_eq!(observations_after_soft.len(), 1);
+
+        // Now hard delete student (completely remove)
+        db.delete_student(student.id, true).await.unwrap();
+
+        // Student should be completely gone
+        let students_after_hard = db.get_students().await.unwrap();
+        assert_eq!(students_after_hard.len(), 0);
+        let all_students_after_hard = db.get_all_students_including_deleted().await.unwrap();
+        assert_eq!(all_students_after_hard.len(), 0);
+
+        // Observations should also be gone
+        let observations_after_hard = db.search_observations(None, None, None).await.unwrap();
+        assert_eq!(observations_after_hard.len(), 0);
+
+        // Now restore via import - student should be restored as active
+        let result = db.import_full_backup(&backup_data).await.unwrap();
+        assert!(result.contains("Successfully imported"));
+
+        // Verify student is restored
+        let students_after_restore = db.get_students().await.unwrap();
+        assert_eq!(students_after_restore.len(), 1);
+        assert_eq!(students_after_restore[0].first_name, "Max");
+        assert_eq!(students_after_restore[0].status, "active");
+
+        // Verify observations are restored
+        let observations_after_restore = db.search_observations(None, None, None).await.unwrap();
+        assert_eq!(observations_after_restore.len(), 1);
+        assert_eq!(observations_after_restore[0].text, "Test observation");
+    }
+
+    #[tokio::test]
     async fn test_create_and_search_observations() {
         let (db, _temp_dir) = create_test_db().await;
 
         // Setup class and student
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
 
         // Create observation
-        let observation = db.create_observation(
-            student.id,
-            1,
-            "social".to_string(),
-            "Shows excellent teamwork skills".to_string(),
-            vec!["teamwork".to_string(), "social".to_string()],
-        ).await.unwrap();
+        let observation = db
+            .create_observation(
+                student.id,
+                1,
+                "social".to_string(),
+                "Shows excellent teamwork skills".to_string(),
+                vec!["teamwork".to_string(), "social".to_string()],
+            )
+            .await
+            .unwrap();
 
         assert_eq!(observation.student_id, student.id);
         assert_eq!(observation.category, "social");
@@ -1007,15 +1549,24 @@ mod tests {
         assert_eq!(observations.len(), 1);
 
         // Search by student ID
-        let student_observations = db.search_observations(None, Some(student.id), None).await.unwrap();
+        let student_observations = db
+            .search_observations(None, Some(student.id), None)
+            .await
+            .unwrap();
         assert_eq!(student_observations.len(), 1);
 
         // Search by text query
-        let text_search = db.search_observations(Some("teamwork".to_string()), None, None).await.unwrap();
+        let text_search = db
+            .search_observations(Some("teamwork".to_string()), None, None)
+            .await
+            .unwrap();
         assert_eq!(text_search.len(), 1);
 
         // Search by category
-        let category_search = db.search_observations(None, None, Some("social".to_string())).await.unwrap();
+        let category_search = db
+            .search_observations(None, None, Some("social".to_string()))
+            .await
+            .unwrap();
         assert_eq!(category_search.len(), 1);
     }
 
@@ -1024,33 +1575,48 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Setup
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
-        let observation = db.create_observation(
-            student.id,
-            1, // Author ID 1
-            "social".to_string(),
-            "Test observation".to_string(),
-            vec![],
-        ).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
+        let observation = db
+            .create_observation(
+                student.id,
+                1, // Author ID 1
+                "social".to_string(),
+                "Test observation".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // Author should be able to delete their observation
         let result = db.delete_observation(observation.id, 1, false).await;
         assert!(result.is_ok());
 
         // Recreate observation for next test
-        let observation2 = db.create_observation(
-            student.id,
-            1, // Author ID 1
-            "social".to_string(),
-            "Test observation 2".to_string(),
-            vec![],
-        ).await.unwrap();
+        let observation2 = db
+            .create_observation(
+                student.id,
+                1, // Author ID 1
+                "social".to_string(),
+                "Test observation 2".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // Different user should not be able to delete
         let result = db.delete_observation(observation2.id, 2, false).await; // Different author ID
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Permission denied"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Permission denied"));
 
         // Force delete should work regardless of author
         let result = db.delete_observation(observation2.id, 2, true).await;
@@ -1062,17 +1628,26 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Setup
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
 
         // Create observation
-        let _observation = db.create_observation(
-            student.id,
-            1,
-            "social".to_string(),
-            "Recent observation".to_string(),
-            vec![],
-        ).await.unwrap();
+        let _observation = db
+            .create_observation(
+                student.id,
+                1,
+                "social".to_string(),
+                "Recent observation".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // Get observations from 1 hour ago
         let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
@@ -1090,15 +1665,24 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Setup test data
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
-        let _observation = db.create_observation(
-            student.id,
-            1,
-            "social".to_string(),
-            "Test for changeset".to_string(),
-            vec!["test".to_string()],
-        ).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
+        let _observation = db
+            .create_observation(
+                student.id,
+                1,
+                "social".to_string(),
+                "Test for changeset".to_string(),
+                vec!["test".to_string()],
+            )
+            .await
+            .unwrap();
 
         // Create changeset file
         let changeset_data = db.create_changeset_file(30).await.unwrap();
@@ -1107,7 +1691,7 @@ mod tests {
         // Parse the changeset to verify structure
         let content = String::from_utf8(changeset_data.clone()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        
+
         assert!(parsed.get("checksum").is_some());
         assert!(parsed.get("data").is_some());
 
@@ -1131,15 +1715,24 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create comprehensive test data
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
-        let _observation = db.create_observation(
-            student.id,
-            1,
-            "social".to_string(),
-            "Full backup test".to_string(),
-            vec!["backup".to_string(), "test".to_string()],
-        ).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
+        let _observation = db
+            .create_observation(
+                student.id,
+                1,
+                "social".to_string(),
+                "Full backup test".to_string(),
+                vec!["backup".to_string(), "test".to_string()],
+            )
+            .await
+            .unwrap();
 
         // Create a mock full backup JSON
         let backup_json = serde_json::json!({
@@ -1180,9 +1773,10 @@ mod tests {
 
         let observations = db.search_observations(None, None, None).await.unwrap();
         assert_eq!(observations.len(), 2); // Original + imported
-        
+
         // Find the imported observation
-        let imported_obs = observations.iter()
+        let imported_obs = observations
+            .iter()
             .find(|o| o.text == "Imported observation")
             .expect("Imported observation not found");
         assert_eq!(imported_obs.id, 999);
@@ -1193,13 +1787,22 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create class with student
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let _student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let _student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
 
         // Soft delete should fail
         let result = db.delete_class(class.id, false).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Cannot delete class with active students"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot delete class with active students"));
 
         // Force delete should work
         let result = db.delete_class(class.id, true).await;
@@ -1219,16 +1822,25 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Try to create student with non-existent class
-        let result = db.create_student(999, "Max".to_string(), "Mustermann".to_string(), None).await;
+        let result = db
+            .create_student(999, "Max".to_string(), "Mustermann".to_string(), None)
+            .await;
         assert!(result.is_err()); // Should fail due to foreign key constraint
 
         // Create valid class first
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await;
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await;
         assert!(student.is_ok()); // Should work now
 
         // Try to create observation with non-existent student
-        let result = db.create_observation(999, 1, "test".to_string(), "test".to_string(), vec![]).await;
+        let result = db
+            .create_observation(999, 1, "test".to_string(), "test".to_string(), vec![])
+            .await;
         assert!(result.is_err()); // Should fail due to foreign key constraint
     }
 
@@ -1243,10 +1855,29 @@ mod tests {
         assert!(!changeset.is_empty());
 
         // Parse and verify structure
-        let changeset_data: serde_json::Value = serde_json::from_str(&changeset).unwrap();
-        assert_eq!(changeset_data["changeset"]["students"].as_array().unwrap().len(), 0);
-        assert_eq!(changeset_data["changeset"]["classes"].as_array().unwrap().len(), 0);
-        assert_eq!(changeset_data["changeset"]["observations"].as_array().unwrap().len(), 0);
+        let changeset_data: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(changeset).unwrap()).unwrap();
+        assert_eq!(
+            changeset_data["changeset"]["students"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            changeset_data["changeset"]["classes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            changeset_data["changeset"]["observations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
         assert!(changeset_data["checksum"].as_str().unwrap().len() > 0);
     }
 
@@ -1255,24 +1886,52 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Setup test data
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
-        let observation = db.create_observation(
-            student.id, 
-            1, 
-            "test".to_string(), 
-            "Test observation".to_string(), 
-            vec!["tag1".to_string()]
-        ).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
+        let observation = db
+            .create_observation(
+                student.id,
+                1,
+                "test".to_string(),
+                "Test observation".to_string(),
+                vec!["tag1".to_string()],
+            )
+            .await
+            .unwrap();
 
         // Export changeset
         let changeset = db.create_changeset_file(30).await.unwrap();
-        
+
         // Parse and verify content
-        let changeset_data: serde_json::Value = serde_json::from_str(&changeset).unwrap();
-        assert_eq!(changeset_data["changeset"]["students"].as_array().unwrap().len(), 1);
-        assert_eq!(changeset_data["changeset"]["classes"].as_array().unwrap().len(), 1);
-        assert_eq!(changeset_data["changeset"]["observations"].as_array().unwrap().len(), 1);
+        let changeset_data: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(changeset).unwrap()).unwrap();
+        assert_eq!(
+            changeset_data["changeset"]["students"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            changeset_data["changeset"]["classes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            changeset_data["changeset"]["observations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Verify checksum exists
         let checksum = changeset_data["checksum"].as_str().unwrap();
@@ -1280,7 +1939,10 @@ mod tests {
 
         // Verify metadata
         assert!(changeset_data["timestamp"].as_str().is_some());
-        assert_eq!(changeset_data["source_device_id"].as_str().unwrap(), "device_001");
+        assert_eq!(
+            changeset_data["source_device_id"].as_str().unwrap(),
+            "device_001"
+        );
     }
 
     #[tokio::test]
@@ -1288,17 +1950,26 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create class and student
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
 
         // Create old observation (simulate by creating it first)
-        let _old_obs = db.create_observation(
-            student.id, 
-            1, 
-            "old".to_string(), 
-            "Old observation".to_string(), 
-            vec![]
-        ).await.unwrap();
+        let _old_obs = db
+            .create_observation(
+                student.id,
+                1,
+                "old".to_string(),
+                "Old observation".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // Wait to ensure time difference
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -1307,17 +1978,23 @@ mod tests {
         let cutoff_time = chrono::Utc::now();
 
         // Create new observation
-        let _new_obs = db.create_observation(
-            student.id, 
-            1, 
-            "new".to_string(), 
-            "New observation".to_string(), 
-            vec![]
-        ).await.unwrap();
+        let _new_obs = db
+            .create_observation(
+                student.id,
+                1,
+                "new".to_string(),
+                "New observation".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // Export with time filter (get observations since cutoff)
-        let observations = db.get_observations_since(cutoff_time - chrono::Duration::seconds(1)).await.unwrap();
-        
+        let observations = db
+            .get_observations_since(cutoff_time - chrono::Duration::seconds(1))
+            .await
+            .unwrap();
+
         // Should contain both observations (within time range)
         assert_eq!(observations.len(), 2);
 
@@ -1332,8 +2009,14 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create initial data
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
 
         // Create changeset with new data
         let changeset_json = serde_json::json!({
@@ -1389,7 +2072,7 @@ mod tests {
             "timestamp": chrono::Utc::now().to_rfc3339()
             // Missing changeset and checksum
         });
-        
+
         let incomplete_data = incomplete_json.to_string().into_bytes();
         let result = db.apply_changeset_file(&incomplete_data).await;
         assert!(result.is_err());
@@ -1417,7 +2100,10 @@ mod tests {
         // Apply changeset should handle constraint violations gracefully
         let result = db.apply_changeset_file(&changeset_data).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("FOREIGN KEY constraint"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("FOREIGN KEY constraint"));
     }
 
     #[tokio::test]
@@ -1425,13 +2111,40 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Setup test data
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student1 = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
-        let student2 = db.create_student(class.id, "Anna".to_string(), "Test".to_string(), None).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student1 = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
+        let student2 = db
+            .create_student(class.id, "Anna".to_string(), "Test".to_string(), None)
+            .await
+            .unwrap();
 
         // Create observations with different timestamps
-        let _obs1 = db.create_observation(student1.id, 1, "old".to_string(), "Old observation".to_string(), vec![]).await.unwrap();
-        let _obs2 = db.create_observation(student2.id, 1, "recent".to_string(), "Recent observation".to_string(), vec![]).await.unwrap();
+        let _obs1 = db
+            .create_observation(
+                student1.id,
+                1,
+                "old".to_string(),
+                "Old observation".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let _obs2 = db
+            .create_observation(
+                student2.id,
+                1,
+                "recent".to_string(),
+                "Recent observation".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // Test full export (all data)
         let all_classes = db.get_classes().await.unwrap();
@@ -1453,9 +2166,24 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create initial data
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
-        let _observation = db.create_observation(student.id, 1, "original".to_string(), "Original observation".to_string(), vec![]).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
+        let _observation = db
+            .create_observation(
+                student.id,
+                1,
+                "original".to_string(),
+                "Original observation".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // Create backup with conflicting IDs
         let backup_json = serde_json::json!({
@@ -1503,27 +2231,45 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create test data
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
 
         // Export changeset to get checksum
         let changeset1 = db.create_changeset_file(30).await.unwrap();
-        let changeset_data1: serde_json::Value = serde_json::from_str(&changeset1).unwrap();
+        let changeset_data1: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(changeset1).unwrap()).unwrap();
         let checksum1 = changeset_data1["checksum"].as_str().unwrap();
 
         // Export again immediately - checksum should be identical
         let changeset2 = db.create_changeset_file(30).await.unwrap();
-        let changeset_data2: serde_json::Value = serde_json::from_str(&changeset2).unwrap();
+        let changeset_data2: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(changeset2).unwrap()).unwrap();
         let checksum2 = changeset_data2["checksum"].as_str().unwrap();
 
         assert_eq!(checksum1, checksum2);
 
         // Add new observation
-        let _new_obs = db.create_observation(student.id, 1, "new".to_string(), "New observation".to_string(), vec![]).await.unwrap();
+        let _new_obs = db
+            .create_observation(
+                student.id,
+                1,
+                "new".to_string(),
+                "New observation".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // Export again - checksum should be different
         let changeset3 = db.create_changeset_file(30).await.unwrap();
-        let changeset_data3: serde_json::Value = serde_json::from_str(&changeset3).unwrap();
+        let changeset_data3: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(changeset3).unwrap()).unwrap();
         let checksum3 = changeset_data3["checksum"].as_str().unwrap();
 
         assert_ne!(checksum1, checksum3);
@@ -1535,8 +2281,19 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create data with specific device ID
-        let class = db.create_class("5a".to_string(), "2023/24".to_string()).await.unwrap();
-        let student = db.create_student(class.id, "Max".to_string(), "Mustermann".to_string(), Some("device_123".to_string())).await.unwrap();
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(
+                class.id,
+                "Max".to_string(),
+                "Mustermann".to_string(),
+                Some("device_123".to_string()),
+            )
+            .await
+            .unwrap();
 
         // Verify device ID is stored
         assert_eq!(student.source_device_id, "device_123");
@@ -1568,30 +2325,39 @@ mod tests {
         let (db, _temp_dir) = create_test_db().await;
 
         // Create large dataset
-        let class = db.create_class("Performance Test".to_string(), "2023/24".to_string()).await.unwrap();
+        let class = db
+            .create_class("Performance Test".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
 
         // Create 50 students
         let mut student_ids = Vec::new();
         for i in 0..50 {
-            let student = db.create_student(
-                class.id, 
-                format!("Student{}", i), 
-                "Test".to_string(), 
-                Some(format!("device_{}", i % 5))
-            ).await.unwrap();
+            let student = db
+                .create_student(
+                    class.id,
+                    format!("Student{}", i),
+                    "Test".to_string(),
+                    Some(format!("device_{}", i % 5)),
+                )
+                .await
+                .unwrap();
             student_ids.push(student.id);
         }
 
         // Create 100 observations
         for i in 0..100 {
             let student_id = student_ids[i % student_ids.len()];
-            let _obs = db.create_observation(
-                student_id,
-                1,
-                "performance".to_string(),
-                format!("Performance test observation {}", i),
-                vec![format!("tag{}", i % 10)]
-            ).await.unwrap();
+            let _obs = db
+                .create_observation(
+                    student_id,
+                    1,
+                    "performance".to_string(),
+                    format!("Performance test observation {}", i),
+                    vec![format!("tag{}", i % 10)],
+                )
+                .await
+                .unwrap();
         }
 
         // Test export performance
@@ -1600,13 +2366,36 @@ mod tests {
         let export_duration = start.elapsed();
 
         // Verify export completed and contains expected data
-        let changeset_data: serde_json::Value = serde_json::from_str(&changeset).unwrap();
-        assert_eq!(changeset_data["changeset"]["students"].as_array().unwrap().len(), 50);
-        assert_eq!(changeset_data["changeset"]["classes"].as_array().unwrap().len(), 1);
-        assert_eq!(changeset_data["changeset"]["observations"].as_array().unwrap().len(), 100);
+        let changeset_data: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(changeset).unwrap()).unwrap();
+        assert_eq!(
+            changeset_data["changeset"]["students"]
+                .as_array()
+                .unwrap()
+                .len(),
+            50
+        );
+        assert_eq!(
+            changeset_data["changeset"]["classes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            changeset_data["changeset"]["observations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            100
+        );
 
         // Export should complete in reasonable time (under 1 second for this size)
-        assert!(export_duration.as_millis() < 1000, "Export took too long: {:?}", export_duration);
+        assert!(
+            export_duration.as_millis() < 1000,
+            "Export took too long: {:?}",
+            export_duration
+        );
 
         // Test full export performance
         let start = std::time::Instant::now();
@@ -1621,6 +2410,10 @@ mod tests {
         assert_eq!(all_observations.len(), 100);
 
         // Full export should also be fast
-        assert!(full_export_duration.as_millis() < 1000, "Full export took too long: {:?}", full_export_duration);
+        assert!(
+            full_export_duration.as_millis() < 1000,
+            "Full export took too long: {:?}",
+            full_export_duration
+        );
     }
 }

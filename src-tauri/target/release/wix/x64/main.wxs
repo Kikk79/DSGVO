@@ -46,7 +46,7 @@
         <Media Id="1" Cabinet="app.cab" EmbedCab="yes" />
 
 
-        <Icon Id="ProductIcon" SourceFile="C:\Users\Klaus\Documents\GH\DSGVO\src-tauri\target\release\resources\icon.ico"/>
+        <Icon Id="ProductIcon" SourceFile="C:\Users\klaus\Documents\GH\DSGVO\src-tauri\target\release\resources\icon.ico"/>
         <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
         <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />      <!-- Remove repair -->
         <SetProperty Id="ARPNOMODIFY" Value="1" After="InstallValidate" Sequence="execute"/>
@@ -110,7 +110,7 @@
                 <!-- Change the Root to HKCU for perUser installations -->
 </Component>
             <Component Id="Path" Guid="28ee03d8-afe5-593b-82b6-f724967e4f09" Win64="$(var.Win64)">
-                <File Id="Path" Source="C:\Users\Klaus\Documents\GH\DSGVO\src-tauri\target\release\schuelerbeobachtung.exe" KeyPath="yes" Checksum="yes"/>
+                <File Id="Path" Source="C:\Users\klaus\Documents\GH\DSGVO\src-tauri\target\release\schuelerbeobachtung.exe" KeyPath="yes" Checksum="yes"/>
 </Component>
             
             <Component Id="CMP_UninstallShortcut" Guid="*">
