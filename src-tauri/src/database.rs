@@ -1,7 +1,6 @@
 use crate::crypto::CryptoManager;
 use crate::{AssessmentRecord, CalendarObservation, Category, Class, Observation, Student, StudentWithStats};
 use anyhow::{Context, Result};
-// use chrono::Utc; // Temporarily unused
 use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use std::path::Path;
