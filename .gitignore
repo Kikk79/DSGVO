@@ -5,7 +5,7 @@
 
 # Tauri build artifacts
 src-tauri/target/*
-
+.chunkhound.json
 
 
 src-tauri/**/dist/
