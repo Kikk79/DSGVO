@@ -32,7 +32,8 @@
       "Bash(rm:*)",
       "Bash(timeout 30 npm run tauri:dev)",
       "mcp__Ref__ref_search_documentation",
-      "mcp__Ref__ref_read_url"
+      "mcp__Ref__ref_read_url",
+      "mcp__sequential-thinking__sequentialthinking"
     ],
     "deny": [],
     "additionalDirectories": []

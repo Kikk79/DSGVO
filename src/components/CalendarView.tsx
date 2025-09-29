@@ -287,6 +287,12 @@ export const CalendarView: React.FC = () => {
     eventDisplay: 'block',
     dayMaxEvents: 3,
     locale: 'de',
+    
+    // Time range configuration for school hours (7:00 AM - 5:00 PM)
+    slotMinTime: '07:00:00',  // Start at 7:00 AM
+    slotMaxTime: '17:00:00',  // End at 5:00 PM (exclusive)
+    scrollTime: '07:00:00',   // Auto-scroll to 7:00 AM on load
+    
     eventDidMount: (info: any) => {
       // Add tooltip with full text
       info.el.title = info.event.extendedProps.fullText || info.event.title;
