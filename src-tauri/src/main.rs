@@ -6,6 +6,7 @@ mod database;
 // mod p2p; // Removed - using file-based changeset sync
 mod audit;
 mod gdpr;
+mod webdav_sync;
 
 #[cfg(test)]
 mod tests;
@@ -136,6 +137,7 @@ pub struct AppState {
     // p2p: Removed - using file-based changeset sync
     pub audit: Arc<audit::AuditLogger>,
     pub gdpr: Arc<gdpr::GdprManager>,
+    pub webdav_sync: Arc<Mutex<Option<Arc<webdav_sync::WebDavSyncManager>>>>,
 }
 
 // Tauri commands
@@ -822,14 +824,17 @@ async fn export_assessments_csv(
 
     for assessment in assessments {
         let formatted_date = assessment.observation_created_at.format("%d.%m.%Y %H:%M");
-        let student_name = format!("{}, {}", assessment.student_last_name, assessment.student_first_name);
+        let student_name = format!(
+            "{}, {}",
+            assessment.student_last_name, assessment.student_first_name
+        );
         let tags: Vec<String> = serde_json::from_str(&assessment.tags).unwrap_or_default();
         let tags_str = tags.join("; ");
-        
+
         // Escape CSV values
         let escaped_text = assessment.text.replace("\"", "\"\"");
         let escaped_tags = tags_str.replace("\"", "\"\"");
-        
+
         csv_content.push_str(&format!(
             "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"\n",
             formatted_date,
@@ -863,7 +868,7 @@ async fn get_calendar_observations(
     let start_dt = chrono::DateTime::parse_from_rfc3339(&start_date)
         .map_err(|e| format!("Invalid start_date format: {}", e))?
         .with_timezone(&chrono::Utc);
-    
+
     let end_dt = chrono::DateTime::parse_from_rfc3339(&end_date)
         .map_err(|e| format!("Invalid end_date format: {}", e))?
         .with_timezone(&chrono::Utc);
@@ -920,6 +925,219 @@ async fn set_database_path(app: tauri::AppHandle, new_path: String) -> Result<()
 
     std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap())
         .map_err(|e| format!("Failed to save configuration: {}", e))?;
+
+    Ok(())
+}
+
+// ============================================
+// WebDAV Sync Commands
+// ============================================
+
+#[tauri::command]
+async fn configure_webdav(
+    state: tauri::State<'_, AppState>,
+    url: String,
+    username: String,
+    password: String,
+) -> Result<String, String> {
+    let db = state.db.lock().await;
+
+    // Store credentials in database (encrypted)
+    db.store_webdav_credentials(url.clone(), username.clone(), password.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Initialize WebDAV sync manager
+    let device_id = db.get_device_id();
+    drop(db); // Release lock
+
+    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new(device_id));
+    sync_manager
+        .configure(url, username, password)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Store sync manager in state
+    let mut webdav_sync = state.webdav_sync.lock().await;
+    *webdav_sync = Some(sync_manager.clone());
+
+    // Start background sync task
+    let state_clone_export = state.inner().clone();
+    let state_clone_import = state.inner().clone();
+    sync_manager.clone().start_background_sync(
+        move || {
+            // Export changeset function
+            tauri::async_runtime::block_on(async {
+                let db = state_clone_export.db.lock().await;
+                match db.create_changeset_file(30).await {
+                    Ok(data) => Ok(data),
+                    Err(e) => {
+                        eprintln!("Failed to export changeset: {}", e);
+                        Ok(vec![]) // Return empty on error to avoid breaking sync
+                    }
+                }
+            })
+        },
+        move |data| {
+            // Import changeset function
+            tauri::async_runtime::block_on(async {
+                if data.is_empty() {
+                    return Ok(()); // Skip empty data
+                }
+                let db = state_clone_import.db.lock().await;
+                match db.apply_changeset_file(&data).await {
+                    Ok(_) => {
+                        println!("✅ Successfully imported changeset");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️ Failed to import changeset: {}", e);
+                        Ok(()) // Don't fail sync on import errors
+                    }
+                }
+            })
+        },
+    );
+
+    // Perform initial sync
+    let state_clone2 = state.inner().clone();
+    let state_clone3 = state.inner().clone();
+    sync_manager
+        .sync_on_startup(
+            move || {
+                tauri::async_runtime::block_on(async {
+                    let db = state_clone2.db.lock().await;
+                    match db.create_changeset_file(30).await {
+                        Ok(data) => Ok(data),
+                        Err(e) => {
+                            eprintln!("Failed to export changeset on startup: {}", e);
+                            Ok(vec![])
+                        }
+                    }
+                })
+            },
+            move |data| {
+                tauri::async_runtime::block_on(async {
+                    if data.is_empty() {
+                        return Ok(());
+                    }
+                    let db = state_clone3.db.lock().await;
+                    match db.apply_changeset_file(&data).await {
+                        Ok(_) => {
+                            println!("✅ Initial sync: imported changeset");
+                            Ok(())
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️ Initial sync: failed to import: {}", e);
+                            Ok(())
+                        }
+                    }
+                })
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok("WebDAV configured successfully".to_string())
+}
+
+#[tauri::command]
+async fn test_webdav_connection(
+    url: String,
+    username: String,
+    password: String,
+) -> Result<bool, String> {
+    let client = webdav_sync::WebDavClient::new(url, username, password);
+    client.test_connection().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn trigger_manual_sync(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let webdav_sync = state.webdav_sync.lock().await;
+
+    if let Some(sync_manager) = webdav_sync.as_ref() {
+        let state_clone = state.inner().clone();
+        let state_clone2 = state.inner().clone();
+
+        sync_manager
+            .sync_on_startup(
+                move || {
+                    tauri::async_runtime::block_on(async {
+                        let db = state_clone.db.lock().await;
+                        match db.create_changeset_file(30).await {
+                            Ok(data) => Ok(data),
+                            Err(e) => {
+                                eprintln!("Manual sync: failed to export: {}", e);
+                                Ok(vec![])
+                            }
+                        }
+                    })
+                },
+                move |data| {
+                    tauri::async_runtime::block_on(async {
+                        if data.is_empty() {
+                            return Ok(());
+                        }
+                        let db = state_clone2.db.lock().await;
+                        match db.apply_changeset_file(&data).await {
+                            Ok(_) => {
+                                println!("✅ Manual sync: imported changeset");
+                                Ok(())
+                            }
+                            Err(e) => {
+                                eprintln!("⚠️ Manual sync: failed to import: {}", e);
+                                Ok(())
+                            }
+                        }
+                    })
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok("Sync completed successfully".to_string())
+    } else {
+        Err("WebDAV not configured".to_string())
+    }
+}
+
+#[tauri::command]
+async fn get_webdav_sync_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.lock().await;
+
+    // Check if configured
+    let credentials = db
+        .get_webdav_credentials()
+        .await
+        .map_err(|e| e.to_string())?;
+    let is_configured = credentials.is_some();
+
+    // Get last sync timestamp
+    let last_sync = db
+        .get_last_sync_timestamp()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Check if sync manager is active
+    let webdav_sync = state.webdav_sync.lock().await;
+    let is_active = webdav_sync.is_some();
+
+    Ok(serde_json::json!({
+        "configured": is_configured,
+        "active": is_active,
+        "last_sync": last_sync,
+        "url": credentials.as_ref().map(|(url, _, _)| url.clone()),
+        "username": credentials.as_ref().map(|(_, username, _)| username.clone()),
+    }))
+}
+
+#[tauri::command]
+async fn disable_webdav_sync(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // Clear sync manager
+    let mut webdav_sync = state.webdav_sync.lock().await;
+    *webdav_sync = None;
 
     Ok(())
 }
@@ -981,9 +1199,73 @@ fn main() {
                 // p2p: Removed - using file-based changeset sync
                 audit,
                 gdpr,
+                webdav_sync: Arc::new(Mutex::new(None)),
             };
 
             app.manage(state.clone());
+
+            // Initialize WebDAV sync if configured
+            tauri::async_runtime::spawn(async move {
+                let db_lock = state.db.lock().await;
+                if let Ok(Some((url, username, password))) = db_lock.get_webdav_credentials().await
+                {
+                    let device_id = db_lock.get_device_id();
+                    drop(db_lock);
+
+                    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new(device_id));
+                    if sync_manager
+                        .configure(url, username, password)
+                        .await
+                        .is_ok()
+                    {
+                        let mut webdav_sync = state.webdav_sync.lock().await;
+                        *webdav_sync = Some(sync_manager.clone());
+                        drop(webdav_sync);
+
+                        println!("✅ WebDAV sync initialized from stored credentials");
+
+                        // Start background sync task
+                        let state_clone_export = state.clone();
+                        let state_clone_import = state.clone();
+                        
+                        sync_manager.clone().start_background_sync(
+                            move || {
+                                tauri::async_runtime::block_on(async {
+                                    let db = state_clone_export.db.lock().await;
+                                    match db.create_changeset_file(30).await {
+                                        Ok(data) => Ok(data),
+                                        Err(e) => {
+                                            eprintln!("Background sync: failed to export: {}", e);
+                                            Ok(vec![])
+                                        }
+                                    }
+                                })
+                            },
+                            move |data| {
+                                tauri::async_runtime::block_on(async {
+                                    if data.is_empty() {
+                                        return Ok(());
+                                    }
+                                    let db = state_clone_import.db.lock().await;
+                                    match db.apply_changeset_file(&data).await {
+                                        Ok(_) => {
+                                            println!("✅ Background sync: imported changeset");
+                                            Ok(())
+                                        }
+                                        Err(e) => {
+                                            eprintln!("⚠️ Background sync: failed to import: {}", e);
+                                            Ok(())
+                                        }
+                                    }
+                                })
+                            },
+                        );
+                        
+                        println!("✅ WebDAV background sync task started");
+                    }
+                }
+            });
+
             Ok(())
         })
         .plugin(tauri_plugin_shell::init())
@@ -1025,7 +1307,13 @@ fn main() {
             get_device_config,
             set_device_config,
             get_database_path,
-            set_database_path
+            set_database_path,
+            // WebDAV Sync commands
+            configure_webdav,
+            test_webdav_connection,
+            trigger_manual_sync,
+            get_webdav_sync_status,
+            disable_webdav_sync
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

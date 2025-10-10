@@ -1,5 +1,7 @@
 use crate::crypto::CryptoManager;
-use crate::{AssessmentRecord, CalendarObservation, Category, Class, Observation, Student, StudentWithStats};
+use crate::{
+    AssessmentRecord, CalendarObservation, Category, Class, Observation, Student, StudentWithStats,
+};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
@@ -367,7 +369,19 @@ impl Database {
     }
 
     pub async fn get_students_with_stats(&self) -> Result<Vec<StudentWithStats>> {
-        let students_with_stats = sqlx::query_as::<_, StudentWithStats>(
+        #[derive(sqlx::FromRow)]
+        struct StudentWithStatsRaw {
+            id: i64,
+            first_name: String,
+            last_name: String,
+            class_name: String,
+            class_id: i64,
+            status: String,
+            observation_count: i64,
+            last_observation_date: Option<String>,
+        }
+
+        let raw_students: Vec<StudentWithStatsRaw> = sqlx::query_as(
             r#"
             SELECT 
                 s.id,
@@ -395,6 +409,24 @@ impl Database {
         .fetch_all(&self.pool)
         .await
         .context("Failed to fetch students with stats")?;
+
+        // Convert String dates to DateTime
+        let students_with_stats = raw_students
+            .into_iter()
+            .map(|raw| StudentWithStats {
+                id: raw.id,
+                first_name: raw.first_name,
+                last_name: raw.last_name,
+                class_name: raw.class_name,
+                class_id: raw.class_id,
+                status: raw.status,
+                observation_count: raw.observation_count,
+                last_observation_date: raw
+                    .last_observation_date
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc)),
+            })
+            .collect();
 
         Ok(students_with_stats)
     }
@@ -434,7 +466,8 @@ impl Database {
             LEFT JOIN classes c ON s.class_id = c.id
             LEFT JOIN categories cat ON o.category = cat.name
             WHERE s.status != 'deleted'
-        "#.to_string();
+        "#
+        .to_string();
 
         let mut bind_values: Vec<String> = Vec::new();
 
@@ -662,7 +695,8 @@ impl Database {
             LEFT JOIN categories cat ON o.category = cat.name
             WHERE o.created_at BETWEEN ? AND ?
               AND s.status = 'active'
-        "#.to_string();
+        "#
+        .to_string();
 
         // Build query dynamically based on filters
         if class_id.is_some() {
@@ -1293,6 +1327,259 @@ impl Database {
         // Update device config in crypto manager, but preserve current device_id
         // Note: We deliberately don't update device_id to keep each device unique
         self.crypto.set_device_config(device_type, device_name)?;
+
+        Ok(())
+    }
+
+    // ============================================
+    // WebDAV Sync Support Methods
+    // ============================================
+
+    /// Store WebDAV credentials (encrypted)
+    pub async fn store_webdav_credentials(
+        &self,
+        url: String,
+        username: String,
+        password: String,
+    ) -> Result<()> {
+        // Encrypt password using device-specific key
+        let encrypted_password = self.encrypt_credential(&password)?;
+
+        // Create sync_config table if not exists
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sync_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                webdav_url TEXT NOT NULL,
+                webdav_username TEXT NOT NULL,
+                webdav_password_encrypted BLOB NOT NULL,
+                auto_sync_enabled BOOLEAN DEFAULT 1,
+                sync_interval_seconds INTEGER DEFAULT 180,
+                last_sync_timestamp DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Upsert credentials (singleton table)
+        sqlx::query(
+            r#"
+            INSERT INTO sync_config (id, webdav_url, webdav_username, webdav_password_encrypted)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                webdav_url = excluded.webdav_url,
+                webdav_username = excluded.webdav_username,
+                webdav_password_encrypted = excluded.webdav_password_encrypted,
+                updated_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(&url)
+        .bind(&username)
+        .bind(&encrypted_password)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get WebDAV credentials (decrypted)
+    pub async fn get_webdav_credentials(&self) -> Result<Option<(String, String, String)>> {
+        #[derive(sqlx::FromRow)]
+        struct SyncConfig {
+            webdav_url: String,
+            webdav_username: String,
+            webdav_password_encrypted: Vec<u8>,
+        }
+
+        let config: Option<SyncConfig> = sqlx::query_as(
+            "SELECT webdav_url, webdav_username, webdav_password_encrypted FROM sync_config WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(config) = config {
+            let decrypted_password = self.decrypt_credential(&config.webdav_password_encrypted)?;
+            Ok(Some((
+                config.webdav_url,
+                config.webdav_username,
+                decrypted_password,
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Update last sync timestamp
+    pub async fn update_last_sync_timestamp(&self) -> Result<()> {
+        sqlx::query("UPDATE sync_config SET last_sync_timestamp = CURRENT_TIMESTAMP WHERE id = 1")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Get last sync timestamp
+    pub async fn get_last_sync_timestamp(&self) -> Result<Option<String>> {
+        #[derive(sqlx::FromRow)]
+        struct LastSync {
+            last_sync_timestamp: Option<String>,
+        }
+
+        let result: Option<LastSync> =
+            sqlx::query_as("SELECT last_sync_timestamp FROM sync_config WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        
+        Ok(result.and_then(|r| r.last_sync_timestamp))
+    }
+
+    /// Check if there are changes since last sync
+    pub async fn has_changes_since(&self, since: chrono::DateTime<chrono::Utc>) -> Result<bool> {
+        // Check if any records were updated after 'since' timestamp
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM (
+                SELECT 1 FROM students WHERE updated_at > ? LIMIT 1
+                UNION ALL
+                SELECT 1 FROM classes WHERE updated_at > ? LIMIT 1
+                UNION ALL
+                SELECT 1 FROM observations WHERE updated_at > ? LIMIT 1
+                UNION ALL
+                SELECT 1 FROM categories WHERE updated_at > ? LIMIT 1
+            )
+            "#,
+        )
+        .bind(since)
+        .bind(since)
+        .bind(since)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count > 0)
+    }
+
+    /// Get device ID
+    pub fn get_device_id(&self) -> String {
+        self.crypto.get_device_id()
+    }
+
+    /// Encrypt credential using device-specific key
+    fn encrypt_credential(&self, plain: &str) -> Result<Vec<u8>> {
+        use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+        use ring::rand::{SecureRandom, SystemRandom};
+
+        let device_id = self.crypto.get_device_id();
+        let key_material = sha2::Sha256::digest(device_id.as_bytes());
+
+        let unbound_key = UnboundKey::new(&AES_256_GCM, &key_material)
+            .map_err(|_| anyhow::anyhow!("Failed to create key"))?;
+        let key = LessSafeKey::new(unbound_key);
+
+        // Generate random nonce
+        let rng = SystemRandom::new();
+        let mut nonce_bytes = vec![0u8; 12];
+        rng.fill(&mut nonce_bytes)
+            .map_err(|_| anyhow::anyhow!("Failed to generate nonce"))?;
+
+        let nonce = Nonce::try_assume_unique_for_key(&nonce_bytes)
+            .map_err(|_| anyhow::anyhow!("Invalid nonce"))?;
+
+        // Encrypt
+        let mut in_out = plain.as_bytes().to_vec();
+        key.seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
+            .map_err(|_| anyhow::anyhow!("Encryption failed"))?;
+
+        // Prepend nonce to ciphertext
+        let mut result = nonce_bytes;
+        result.extend_from_slice(&in_out);
+
+        Ok(result)
+    }
+
+    /// Decrypt credential using device-specific key
+    fn decrypt_credential(&self, encrypted: &[u8]) -> Result<String> {
+        use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+
+        if encrypted.len() < 12 {
+            return Err(anyhow::anyhow!("Invalid encrypted data"));
+        }
+
+        let device_id = self.crypto.get_device_id();
+        let key_material = sha2::Sha256::digest(device_id.as_bytes());
+
+        let unbound_key = UnboundKey::new(&AES_256_GCM, &key_material)
+            .map_err(|_| anyhow::anyhow!("Failed to create key"))?;
+        let key = LessSafeKey::new(unbound_key);
+
+        // Extract nonce and ciphertext
+        let (nonce_bytes, ciphertext) = encrypted.split_at(12);
+        let nonce = Nonce::try_assume_unique_for_key(nonce_bytes)
+            .map_err(|_| anyhow::anyhow!("Invalid nonce"))?;
+
+        // Decrypt
+        let mut in_out = ciphertext.to_vec();
+        let decrypted = key
+            .open_in_place(nonce, Aad::empty(), &mut in_out)
+            .map_err(|_| anyhow::anyhow!("Decryption failed"))?;
+
+        String::from_utf8(decrypted.to_vec()).context("Failed to convert decrypted data to string")
+    }
+
+    /// Log sync operation to audit trail
+    pub async fn log_sync_operation(
+        &self,
+        sync_type: &str,
+        sync_direction: &str,
+        changeset_filename: Option<&str>,
+        records_synced: i32,
+        bytes_transferred: i64,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        // Create sync_log table if not exists
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sync_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sync_type TEXT NOT NULL,
+                sync_direction TEXT NOT NULL,
+                changeset_filename TEXT,
+                records_synced INTEGER DEFAULT 0,
+                bytes_transferred INTEGER DEFAULT 0,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                source_device_id TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        let device_id = self.crypto.get_device_id();
+
+        sqlx::query(
+            r#"
+            INSERT INTO sync_log (
+                sync_type, sync_direction, changeset_filename,
+                records_synced, bytes_transferred, status, error_message, source_device_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(sync_type)
+        .bind(sync_direction)
+        .bind(changeset_filename)
+        .bind(records_synced)
+        .bind(bytes_transferred)
+        .bind(status)
+        .bind(error_message)
+        .bind(&device_id)
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }
