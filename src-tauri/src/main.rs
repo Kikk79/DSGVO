@@ -967,8 +967,9 @@ async fn configure_webdav(
     sync_manager.clone().start_background_sync(
         move || {
             // Export changeset function
-            tauri::async_runtime::block_on(async {
-                let db = state_clone_export.db.lock().await;
+            let state = state_clone_export.clone();
+            async move {
+                let db = state.db.lock().await;
                 match db.create_changeset_file(30).await {
                     Ok(data) => Ok(data),
                     Err(e) => {
@@ -976,15 +977,16 @@ async fn configure_webdav(
                         Ok(vec![]) // Return empty on error to avoid breaking sync
                     }
                 }
-            })
+            }
         },
         move |data| {
             // Import changeset function
-            tauri::async_runtime::block_on(async {
+            let state = state_clone_import.clone();
+            async move {
                 if data.is_empty() {
                     return Ok(()); // Skip empty data
                 }
-                let db = state_clone_import.db.lock().await;
+                let db = state.db.lock().await;
                 match db.apply_changeset_file(&data).await {
                     Ok(_) => {
                         println!("✅ Successfully imported changeset");
@@ -995,7 +997,7 @@ async fn configure_webdav(
                         Ok(()) // Don't fail sync on import errors
                     }
                 }
-            })
+            }
         },
     );
 
@@ -1005,8 +1007,9 @@ async fn configure_webdav(
     sync_manager
         .sync_on_startup(
             move || {
-                tauri::async_runtime::block_on(async {
-                    let db = state_clone2.db.lock().await;
+                let state = state_clone2.clone();
+                async move {
+                    let db = state.db.lock().await;
                     match db.create_changeset_file(30).await {
                         Ok(data) => Ok(data),
                         Err(e) => {
@@ -1014,14 +1017,15 @@ async fn configure_webdav(
                             Ok(vec![])
                         }
                     }
-                })
+                }
             },
             move |data| {
-                tauri::async_runtime::block_on(async {
+                let state = state_clone3.clone();
+                async move {
                     if data.is_empty() {
                         return Ok(());
                     }
-                    let db = state_clone3.db.lock().await;
+                    let db = state.db.lock().await;
                     match db.apply_changeset_file(&data).await {
                         Ok(_) => {
                             println!("✅ Initial sync: imported changeset");
@@ -1032,7 +1036,7 @@ async fn configure_webdav(
                             Ok(())
                         }
                     }
-                })
+                }
             },
         )
         .await
@@ -1062,8 +1066,9 @@ async fn trigger_manual_sync(state: tauri::State<'_, AppState>) -> Result<String
         sync_manager
             .sync_on_startup(
                 move || {
-                    tauri::async_runtime::block_on(async {
-                        let db = state_clone.db.lock().await;
+                    let state = state_clone.clone();
+                    async move {
+                        let db = state.db.lock().await;
                         match db.create_changeset_file(30).await {
                             Ok(data) => Ok(data),
                             Err(e) => {
@@ -1071,14 +1076,15 @@ async fn trigger_manual_sync(state: tauri::State<'_, AppState>) -> Result<String
                                 Ok(vec![])
                             }
                         }
-                    })
+                    }
                 },
                 move |data| {
-                    tauri::async_runtime::block_on(async {
+                    let state = state_clone2.clone();
+                    async move {
                         if data.is_empty() {
                             return Ok(());
                         }
-                        let db = state_clone2.db.lock().await;
+                        let db = state.db.lock().await;
                         match db.apply_changeset_file(&data).await {
                             Ok(_) => {
                                 println!("✅ Manual sync: imported changeset");
@@ -1089,7 +1095,7 @@ async fn trigger_manual_sync(state: tauri::State<'_, AppState>) -> Result<String
                                 Ok(())
                             }
                         }
-                    })
+                    }
                 },
             )
             .await
@@ -1230,8 +1236,9 @@ fn main() {
                         
                         sync_manager.clone().start_background_sync(
                             move || {
-                                tauri::async_runtime::block_on(async {
-                                    let db = state_clone_export.db.lock().await;
+                                let state = state_clone_export.clone();
+                                async move {
+                                    let db = state.db.lock().await;
                                     match db.create_changeset_file(30).await {
                                         Ok(data) => Ok(data),
                                         Err(e) => {
@@ -1239,14 +1246,15 @@ fn main() {
                                             Ok(vec![])
                                         }
                                     }
-                                })
+                                }
                             },
                             move |data| {
-                                tauri::async_runtime::block_on(async {
+                                let state = state_clone_import.clone();
+                                async move {
                                     if data.is_empty() {
                                         return Ok(());
                                     }
-                                    let db = state_clone_import.db.lock().await;
+                                    let db = state.db.lock().await;
                                     match db.apply_changeset_file(&data).await {
                                         Ok(_) => {
                                             println!("✅ Background sync: imported changeset");
@@ -1257,7 +1265,7 @@ fn main() {
                                             Ok(())
                                         }
                                     }
-                                })
+                                }
                             },
                         );
                         
@@ -1267,6 +1275,42 @@ fn main() {
             });
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let app_handle = window.app_handle();
+                
+                // Try to get the state and perform shutdown sync
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    tauri::async_runtime::block_on(async {
+                        let webdav_sync = state.webdav_sync.lock().await;
+                        
+                        if let Some(sync_manager) = webdav_sync.as_ref() {
+                            let state_clone = state.inner().clone();
+                            
+                            let result = sync_manager
+                                .sync_on_shutdown(move || {
+                                    let state = state_clone.clone();
+                                    async move {
+                                        let db = state.db.lock().await;
+                                        match db.create_changeset_file(30).await {
+                                            Ok(data) => Ok(data),
+                                            Err(e) => {
+                                                eprintln!("Shutdown sync: failed to export: {}", e);
+                                                Ok(vec![])
+                                            }
+                                        }
+                                    }
+                                })
+                                .await;
+                            
+                            if let Err(e) = result {
+                                eprintln!("⚠️ Shutdown sync failed: {}", e);
+                            }
+                        }
+                    });
+                }
+            }
         })
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())

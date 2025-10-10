@@ -514,9 +514,9 @@ impl Database {
             "student_last_name" => "s.last_name",
             "class_name" => "c.name",
             "category" => "o.category",
-            "observation_created_at" => "o.created_at",
-            "observation_updated_at" => "o.updated_at",
-            _ => "o.created_at", // Default fallback
+            "observation_created_at" => "datetime(o.created_at)",
+            "observation_updated_at" => "datetime(o.updated_at)",
+            _ => "datetime(o.created_at)", // Default fallback
         };
 
         let sort_dir = if sort_direction.to_lowercase() == "asc" {

@@ -43,6 +43,7 @@ impl WebDavClient {
 
     /// List all files in WebDAV directory
     pub async fn list_files(&self) -> Result<Vec<String>> {
+        println!("🔍 Querying WebDAV URL: {}", self.base_url);
         let response = self
             .client
             .request(reqwest::Method::from_bytes(b"PROPFIND")?, &self.base_url)
@@ -61,8 +62,11 @@ impl WebDavClient {
             ));
         }
 
+        println!("✅ PROPFIND response status: {}", response.status());
         let body = response.text().await?;
+        println!("📄 WebDAV response (first 500 chars): {}", &body.chars().take(500).collect::<String>());
         let files = self.parse_webdav_listing(&body)?;
+        println!("📂 Parsed {} file(s) from WebDAV", files.len());
 
         Ok(files)
     }
@@ -166,10 +170,15 @@ impl WebDavClient {
                 {
                     in_href = false;
                     // Extract filename from href (handle URL encoded paths)
+                    println!("🔗 Found href: {}", current_href);
                     if let Some(filename) = current_href.split('/').last() {
                         let decoded = urlencoding::decode(filename).unwrap_or_default();
+                        println!("  → Extracted filename: '{}'", decoded);
                         if !decoded.is_empty() && decoded.starts_with("changeset_") {
+                            println!("  ✅ Adding to files list: {}", decoded);
                             files.push(decoded.to_string());
+                        } else if !decoded.is_empty() {
+                            println!("  ❌ Skipped (not a changeset file)");
                         }
                     }
                 }
@@ -229,11 +238,15 @@ impl WebDavSyncManager {
     }
 
     /// Sync on app startup
-    pub async fn sync_on_startup(
+    pub async fn sync_on_startup<ExportFut, ImportFut>(
         &self,
-        export_changeset_fn: impl Fn() -> Result<Vec<u8>>,
-        import_changeset_fn: impl Fn(Vec<u8>) -> Result<()>,
-    ) -> Result<()> {
+        export_changeset_fn: impl Fn() -> ExportFut,
+        import_changeset_fn: impl Fn(Vec<u8>) -> ImportFut,
+    ) -> Result<()>
+    where
+        ExportFut: std::future::Future<Output = Result<Vec<u8>>>,
+        ImportFut: std::future::Future<Output = Result<()>>,
+    {
         if !self.is_configured().await {
             println!("WebDAV not configured, skipping startup sync");
             return Ok(());
@@ -252,11 +265,17 @@ impl WebDavSyncManager {
     }
 
     /// Start background sync task (every 3 minutes)
-    pub fn start_background_sync(
+    pub fn start_background_sync<ExportFn, ImportFn, ExportFut, ImportFut>(
         self: Arc<Self>,
-        export_changeset_fn: impl Fn() -> Result<Vec<u8>> + Send + Sync + 'static,
-        import_changeset_fn: impl Fn(Vec<u8>) -> Result<()> + Send + Sync + 'static,
-    ) {
+        export_changeset_fn: ExportFn,
+        import_changeset_fn: ImportFn,
+    )
+    where
+        ExportFn: Fn() -> ExportFut + Send + Sync + 'static,
+        ImportFn: Fn(Vec<u8>) -> ImportFut + Send + Sync + 'static,
+        ExportFut: std::future::Future<Output = Result<Vec<u8>>> + Send,
+        ImportFut: std::future::Future<Output = Result<()>> + Send,
+    {
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(180)); // 3 minutes
 
@@ -279,10 +298,13 @@ impl WebDavSyncManager {
     }
 
     /// Sync on app shutdown
-    pub async fn sync_on_shutdown(
+    pub async fn sync_on_shutdown<ExportFut>(
         &self,
-        export_changeset_fn: impl Fn() -> Result<Vec<u8>>,
-    ) -> Result<()> {
+        export_changeset_fn: impl Fn() -> ExportFut,
+    ) -> Result<()>
+    where
+        ExportFut: std::future::Future<Output = Result<Vec<u8>>>,
+    {
         if !self.is_configured().await {
             println!("WebDAV not configured, skipping shutdown sync");
             return Ok(());
@@ -295,11 +317,17 @@ impl WebDavSyncManager {
     }
 
     /// Bidirectional sync
-    async fn sync_bidirectional(
+    async fn sync_bidirectional<ExportFn, ImportFn, ExportFut, ImportFut>(
         &self,
-        export_changeset_fn: &(impl Fn() -> Result<Vec<u8>> + Sync),
-        import_changeset_fn: &(impl Fn(Vec<u8>) -> Result<()> + Sync),
-    ) -> Result<()> {
+        export_changeset_fn: &ExportFn,
+        import_changeset_fn: &ImportFn,
+    ) -> Result<()>
+    where
+        ExportFn: Fn() -> ExportFut + Sync,
+        ImportFn: Fn(Vec<u8>) -> ImportFut + Sync,
+        ExportFut: std::future::Future<Output = Result<Vec<u8>>>,
+        ImportFut: std::future::Future<Output = Result<()>>,
+    {
         // Import from WebDAV
         self.sync_from_webdav(import_changeset_fn).await?;
 
@@ -314,10 +342,14 @@ impl WebDavSyncManager {
     }
 
     /// Import changesets from WebDAV
-    async fn sync_from_webdav(
+    async fn sync_from_webdav<ImportFn, ImportFut>(
         &self,
-        import_changeset_fn: impl Fn(Vec<u8>) -> Result<()>,
-    ) -> Result<()> {
+        import_changeset_fn: ImportFn,
+    ) -> Result<()>
+    where
+        ImportFn: Fn(Vec<u8>) -> ImportFut,
+        ImportFut: std::future::Future<Output = Result<()>>,
+    {
         let webdav_client_guard = self.webdav_client.lock().await;
         let webdav_client = webdav_client_guard
             .as_ref()
@@ -327,17 +359,22 @@ impl WebDavSyncManager {
         let files = webdav_client.list_files().await?;
 
         let mut imported_count = 0;
+        println!("🔑 Current device ID: {}", self.device_id);
+        println!("📂 Found {} file(s) on WebDAV to process", files.len());
 
         for filename in files {
+            println!("📄 Processing: {}", filename);
             // Skip our own changesets
             if filename.contains(&self.device_id) {
+                println!("  ⏭️ Skipping own changeset: {}", filename);
                 continue;
             }
+            println!("  📥 Will attempt to import: {}", filename);
 
             // Download and import changeset
             match webdav_client.download_file(&filename).await {
                 Ok(data) => {
-                    match import_changeset_fn(data) {
+                    match import_changeset_fn(data).await {
                         Ok(_) => {
                             println!("✅ Imported: {}", filename);
                             imported_count += 1;
@@ -366,17 +403,21 @@ impl WebDavSyncManager {
     }
 
     /// Export changesets to WebDAV
-    async fn sync_to_webdav(
+    async fn sync_to_webdav<ExportFn, ExportFut>(
         &self,
-        export_changeset_fn: impl Fn() -> Result<Vec<u8>>,
-    ) -> Result<()> {
+        export_changeset_fn: ExportFn,
+    ) -> Result<()>
+    where
+        ExportFn: Fn() -> ExportFut,
+        ExportFut: std::future::Future<Output = Result<Vec<u8>>>,
+    {
         let webdav_client_guard = self.webdav_client.lock().await;
         let webdav_client = webdav_client_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("WebDAV not configured"))?;
 
         // Export local changeset
-        let changeset_data = export_changeset_fn()?;
+        let changeset_data = export_changeset_fn().await?;
 
         // Check if there are actual changes
         if changeset_data.is_empty() {
