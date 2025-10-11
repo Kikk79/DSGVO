@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Schuelerbeobachtung</string>
+    <string name="title_activity_main">Schuelerbeobachtung</string>
+    <string name="package_name">com.school.schuelerbeobachtung</string>
+    <string name="custom_url_scheme">com.school.schuelerbeobachtung</string>
+</resources>
