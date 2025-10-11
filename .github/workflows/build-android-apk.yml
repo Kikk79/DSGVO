@@ -2,9 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ master, main, mobile ]
+    branches: [ master, main, mobile, dev, Dev ]
   pull_request:
-    branches: [ master, main, mobile ]
+    branches: [ master, main, mobile, dev, Dev ]
   workflow_dispatch:  # Allows manual triggering
 
 jobs:
@@ -39,20 +39,16 @@ jobs:
     - name: Install Capacitor CLI
       run: npm install -g @capacitor/cli
 
-    - name: Add Capacitor Android platform
+    - name: Sync Capacitor Android platform
       run: |
         if [ ! -d "android" ]; then
           npx cap add android
         fi
+        npx cap sync android
 
-    - name: Copy web assets to Android
-      run: npx cap copy android
-
-    - name: Update Android project
-      run: npx cap update android
 
     - name: Accept Android licenses
-      run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+      run: echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || echo "License acceptance failed, continuing..."
 
     - name: Build Android APK (Debug)
       run: |
@@ -80,26 +76,19 @@ jobs:
         retention-days: 30
 
     - name: Create Release
-      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
-      uses: actions/create-release@v1
+      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/Dev'
+      uses: softprops/action-gh-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: apk-${{ github.run_number }}
-        release_name: Android APK Build ${{ github.run_number }}
+        name: Android APK Build ${{ github.run_number }}
         body: |
           Automatically built Android APK for Schuelerbeobachtung
-
-          **Changes in this build:**
-          ${{ github.event.head_commit.message }}
 
           **Downloads:**
           - Debug APK: For testing and development
           - Release APK: For production use
-
-          **Installation:**
-          1. Download the APK file
-          2. Enable "Install from unknown sources" on your Android device
-          3. Install the APK
-        draft: false
-        prerelease: false
+        files: |
+          android/app/build/outputs/apk/debug/*.apk
+          android/app/build/outputs/apk/release/*.apk
