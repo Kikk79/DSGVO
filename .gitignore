@@ -4,7 +4,10 @@
 **/*.rs.bk
 
 # Tauri build artifacts
-src-tauri/target/
+src-tauri/target/*
+.chunkhound.json
+
+
 src-tauri/**/dist/
 
 # Node
@@ -40,3 +43,18 @@ Xcdoe-CLI-SDK/Command_Line_Tools_for_Xcode_11.3.1.dmg
 Xcdoe-CLI-SDK/Command_Line_Tools_for_Xcode_11.5.dmg
 Xcdoe-CLI-SDK/Command_Line_Tools_for_Xcode_16.2.dmg
 .aider*
+.chunkhound/db
+.chunkhound/db.wal
+
+.chunkhound.json
+
+# Claude Config Manager Extension - Security Rules
+# Prevents accidental commit of private conversation data
+.claude/.chats/
+.claude/.chats/**
+.claude/settings.local.json
+
+# Team-sharable Claude Code files (tracked by git):
+# .claude/settings.json     # Team settings (official Claude Code)
+# .claude/commands/         # Team slash commands (official Claude Code)
+# .claude/.plans/           # Project documentation (extension-specific)

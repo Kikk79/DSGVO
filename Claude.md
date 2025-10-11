@@ -545,13 +545,15 @@ fn test_database_migration_handling() {
 **Color System:**
 
 Each category supports three color values:
+
 - **Primary Color** (`color`) - Border and accent color (e.g., `#3B82F6`)
-- **Background Color** (`background_color`) - Fill color (e.g., `#DBEAFE`)  
+- **Background Color** (`background_color`) - Fill color (e.g., `#DBEAFE`)
 - **Text Color** (`text_color`) - Text color for readability (e.g., `#1E3A8A`)
 
 **Default Categories:**
 
 Automatically created on first run with professional color schemes:
+
 1. **Sozial** - Green theme (`#10B981`, `#D1FAE5`, `#065F46`)
 2. **Fachlich** - Blue theme (`#3B82F6`, `#DBEAFE`, `#1E3A8A`)
 3. **Verhalten** - Amber theme (`#F59E0B`, `#FEF3C7`, `#92400E`)
@@ -646,7 +648,7 @@ npm run tauri:build        # MUST succeed completely
 **Essential Documentation:**
 
 - `CHANGELOG.md` - ✨ NEW: Complete version history and feature documentation
-- `docs/API.md` - Complete Tauri command reference  
+- `docs/API.md` - Complete Tauri command reference
 - `docs/DELETE_FEATURES.md` - GDPR deletion implementation
 - `docs/DPIA.md` - Data Protection Impact Assessment
 - `ENCRYPTION_DISABLED.md` - Current security status
@@ -674,3 +676,22 @@ npm run tauri:build        # MUST succeed completely
 **📅 Last Updated**: 2025-01-24 • **🔒 GDPR-Compliant** • **⚠️ No-Crypto Version** • **🔄 Unified Sync** • **🎨 Custom Categories**
 
 - Always update correspondending .MD Files after making any changes worth mentioned to keep users and future Claude instances on track
+
+
+# PROJECT_PLAN Integration
+# Added by Claude Config Manager Extension
+
+When working on this project, always refer to and maintain the project plan located at `.claude/.plans/PROJECT_PLAN.md`.
+
+**Instructions for Claude Code:**
+1. **Read the project plan first** - Always check `.claude/.plans/PROJECT_PLAN.md` when starting work to understand the project context, architecture, and current priorities.
+2. **Update the project plan regularly** - When making significant changes, discoveries, or completing major features, update the relevant sections in PROJECT_PLAN.md to keep it current.
+3. **Use it for context** - Reference the project plan when making architectural decisions, understanding dependencies, or explaining code to ensure consistency with project goals.
+
+**Plan Mode Integration:**
+- **When entering plan mode**: Read the current PROJECT_PLAN.md to understand existing context and priorities
+- **During plan mode**: Build upon and refine the existing project plan structure
+- **When exiting plan mode**: ALWAYS update PROJECT_PLAN.md with your new plan details, replacing or enhancing the relevant sections (Architecture, TODO, Development Workflow, etc.)
+- **Plan persistence**: The PROJECT_PLAN.md serves as the permanent repository for all planning work - plan mode should treat it as the single source of truth
+
+This ensures better code quality and maintains project knowledge continuity across different Claude Code sessions and plan mode iterations.
