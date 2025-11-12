@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { screen, waitFor, within, fireEvent } from '@testing-library/react';
+import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { UnifiedSyncManager } from '../UnifiedSyncManager';
 import { renderWithProviders, createMockStore } from '../../test/utils';
 
 // Mock file operations
-global.URL.createObjectURL = vi.fn(() => 'mock-url');
-global.URL.revokeObjectURL = vi.fn();
+(globalThis as any).URL.createObjectURL = vi.fn(() => 'mock-url');
+(globalThis as any).URL.revokeObjectURL = vi.fn();
 
 // Mock document methods
 const mockDownloadLink = {
@@ -32,7 +32,7 @@ Object.defineProperty(document.body, 'removeChild', {
 });
 
 // Mock FileReader
-global.FileReader = vi.fn().mockImplementation(() => ({
+(globalThis as any).FileReader = vi.fn().mockImplementation(() => ({
   readAsText: vi.fn(),
   addEventListener: vi.fn(),
   result: null,
@@ -238,7 +238,7 @@ describe('UnifiedSyncManager Component', () => {
     });
 
     it('shows loading state during export', async () => {
-      const user = userEvent.setup();
+      userEvent.setup(); // Setup user events
       mockStore.loading = true;
       
       renderWithProviders(<UnifiedSyncManager />, { mockStore });
@@ -295,7 +295,7 @@ describe('UnifiedSyncManager Component', () => {
         onload: null as any,
       };
       
-      vi.mocked(global.FileReader).mockImplementation(() => mockFileReader);
+      vi.mocked((globalThis as any).FileReader).mockImplementation(() => mockFileReader);
       
       // Select file
       const fileInput = screen.getByLabelText('Import-Datei auswählen');
@@ -331,7 +331,7 @@ describe('UnifiedSyncManager Component', () => {
         onload: null as any,
       };
       
-      vi.mocked(global.FileReader).mockImplementation(() => mockFileReader);
+      vi.mocked((globalThis as any).FileReader).mockImplementation(() => mockFileReader);
       
       // Select DAT file
       const fileInput = screen.getByLabelText('Import-Datei auswählen');
@@ -367,7 +367,7 @@ describe('UnifiedSyncManager Component', () => {
         result: '{"format":"full_export","data":{}}',
         onload: null as any,
       };
-      vi.mocked(global.FileReader).mockImplementation(() => mockFileReader);
+      vi.mocked((globalThis as any).FileReader).mockImplementation(() => mockFileReader);
       
       const fileInput = screen.getByLabelText('Import-Datei auswählen');
       const file = new File(['{}'], 'backup.json', { type: 'application/json' });
@@ -398,7 +398,7 @@ describe('UnifiedSyncManager Component', () => {
         result: 'invalid content',
         onload: null as any,
       };
-      vi.mocked(global.FileReader).mockImplementation(() => mockFileReader);
+      vi.mocked((globalThis as any).FileReader).mockImplementation(() => mockFileReader);
       
       const fileInput = screen.getByLabelText('Import-Datei auswählen');
       const file = new File(['invalid'], 'invalid.txt', { type: 'text/plain' });

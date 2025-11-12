@@ -18,5 +18,16 @@
     "react": {
       "version": "detect"
     }
-  }
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "**/*.test.tsx", "**/tests/**/*.ts", "**/tests/**/*.tsx", "**/setup.ts"],
+      "env": {
+        "jest": true
+      },
+      "rules": {
+        "no-redeclare": "off"
+      }
+    }
+  ]
 }
