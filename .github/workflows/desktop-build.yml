@@ -1,0 +1,181 @@
+name: Multi-Platform Desktop Build
+
+on:
+  push:
+    branches: [main, master, Dev]
+  workflow_dispatch:
+  schedule:
+    # Run nightly builds to catch regressions
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-linux:
+    name: Build Linux (.deb)
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libssl-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build the app (Linux)
+        run: npm run tauri build
+
+      - name: Upload artifacts (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
+          retention-days: 30
+
+  build-windows:
+    name: Build Windows (.msi)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build the app (Windows)
+        run: npm run tauri build
+
+      - name: Upload artifacts (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          retention-days: 30
+
+  build-macos:
+    name: Build macOS (.dmg)
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - args: '--target aarch64-apple-darwin'
+            name: 'macos-arm64'
+          - args: '--target x86_64-apple-darwin'
+            name: 'macos-x64'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build the app (macOS)
+        run: npm run tauri build ${{ matrix.args }}
+
+      - name: Upload artifacts (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            src-tauri/target/*/release/bundle/dmg/*.dmg
+            src-tauri/target/*/release/bundle/macos/*.app
+          retention-days: 30
+
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-windows, build-macos]
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create build summary
+        run: |
+          echo "# Multi-Platform Build Summary" > build-summary.md
+          echo "" >> build-summary.md
+          echo "**Build Date**: $(date)" >> build-summary.md
+          echo "" >> build-summary.md
+          echo "## Build Results" >> build-summary.md
+          echo "" >> build-summary.md
+          echo "| Platform | Status | Artifacts |" >> build-summary.md
+          echo "|----------|--------|-----------|" >> build-summary.md
+          echo "| Linux (.deb) | ${{ needs.build-linux.result }} | [Download](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> build-summary.md
+          echo "| Windows (.msi) | ${{ needs.build-windows.result }} | [Download](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> build-summary.md
+          echo "| macOS ARM64 (.dmg) | ${{ needs.build-macos.result }} | [Download](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> build-summary.md
+          echo "| macOS x86_64 (.dmg) | ${{ needs.build-macos.result }} | [Download](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> build-summary.md
+          echo "" >> build-summary.md
+          
+          cat build-summary.md
+
+      - name: Upload build summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-summary
+          path: build-summary.md
+          retention-days: 30

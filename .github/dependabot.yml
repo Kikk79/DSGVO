@@ -1,63 +1,59 @@
 version: 2
 updates:
-  # npm dependencies
+  # npm dependency updates
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-      time: "09:00"
-    open-pull-requests-limit: 10
+      time: "04:00"
+    open-pull-requests-limit: 5
     reviewers:
+      - "Kikk79"
+    assignees:
       - "Kikk79"
     labels:
       - "dependencies"
       - "npm"
     commit-message:
-      prefix: "chore"
+      prefix: "chore(deps): "
+      prefix-development: "chore(deps-dev): "
       include: "scope"
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
-    groups:
-      production-dependencies:
-        dependency-type: "production"
-        update-types:
-          - "minor"
-          - "patch"
-      development-dependencies:
-        dependency-type: "development"
-        update-types:
-          - "minor"
-          - "patch"
+    pull-request-branch-name:
+      separator: "/"
+    rebase-strategy: "auto"
+    allow:
+      - dependency-type: "all"
+    versioning-strategy: "auto"
 
-  # Cargo dependencies
+  # Cargo (Rust) dependency updates
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
     schedule:
       interval: "weekly"
       day: "monday"
-      time: "09:00"
-    open-pull-requests-limit: 10
+      time: "04:30"
+    open-pull-requests-limit: 3
     reviewers:
+      - "Kikk79"
+    assignees:
       - "Kikk79"
     labels:
       - "dependencies"
-      - "rust"
+      - "cargo"
     commit-message:
-      prefix: "chore"
+      prefix: "chore(deps): "
       include: "scope"
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+    allow:
+      - dependency-type: "all"
 
-  # GitHub Actions
+  # GitHub Actions workflow updates
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "monthly"
-      day: "monday"
-      time: "09:00"
+      interval: "weekly"
+      day: "sunday"
+      time: "05:00"
     open-pull-requests-limit: 5
     reviewers:
       - "Kikk79"
@@ -65,5 +61,5 @@ updates:
       - "dependencies"
       - "github-actions"
     commit-message:
-      prefix: "ci"
+      prefix: "ci: "
       include: "scope"
