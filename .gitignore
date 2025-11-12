@@ -4,7 +4,10 @@
 **/*.rs.bk
 
 # Tauri build artifacts
-src-tauri/target/*
+src-tauri/target/**/build/*
+src-tauri/target/**/deps/*
+src-tauri/target/**/incremental/*
+src-tauri/target/**/.fingerprint/*
 .chunkhound.json
 
 

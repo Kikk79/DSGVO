@@ -1,8 +1,24 @@
 {
   "name": "schuelerbeobachtung",
+  "version": "0.1.1",
   "private": true,
-  "version": "0.1.0",
+  "description": "apk",
+  "homepage": "https://github.com/Kikk79/DSGVOAPK#readme",
+  "bugs": {
+    "url": "https://github.com/Kikk79/DSGVOAPK/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kikk79/DSGVOAPK.git"
+  },
+  "license": "ISC",
+  "author": "",
   "type": "module",
+  "main": "postcss.config.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
