@@ -129,12 +129,26 @@ All security scans generate a comprehensive report that includes:
 
 ### Build Process
 
-1. **Checkout Code**: Retrieve source from repository
-2. **Setup Node.js 18**: Install frontend dependencies
-3. **Setup Rust**: Install Rust toolchain and targets
-4. **Caching**: Use swatinem/rust-cache for faster builds
-5. **Build**: Run `npm run tauri build`
-6. **Upload Artifacts**: Store for 30 days
+1. **Pre-build Checks** (Ubuntu): Validates frontend build and Rust code
+   - Checks frontend build
+   - Validates Rust formatting
+   - Fails fast if issues detected
+   
+2. **Platform-Specific Builds** (Linux/Windows/macOS):
+   - Checkout Code
+   - Setup Node.js 18
+   - Setup Rust with platform targets
+   - Caching: Use swatinem/rust-cache for faster builds
+   - Install platform dependencies
+   - Build frontend
+   - Build Tauri application
+   - Check for build artifacts
+   - Upload artifacts (30-day retention)
+
+3. **Error Handling**:
+   - All builds use `continue-on-error: true` to complete even on failure
+   - Build logs uploaded separately for debugging
+   - Build summary report generated with status
 
 ### Triggers
 
@@ -220,19 +234,23 @@ Runs on every push:
 ### Build Failures
 
 **Linux Build Fails**:
-- Check Ubuntu 20.04 compatibility
-- Verify all system dependencies installed
-- Review Tauri documentation for Linux
+- **Missing GTK libraries**: Install `libgtk-3-dev`, `libglib2.0-dev`, `libwebkit2gtk-4.0-dev`
+- **pkg-config not found**: Install `pkg-config`
+- **Missing development headers**: Run `sudo apt-get install build-essential`
+- **WebKit build issues**: Ensure `libwebkit2gtk-4.0-dev` is installed
+- Solution: Workflow automatically installs all dependencies via `apt-get`
 
 **Windows Build Fails**:
-- Ensure MSVC toolchain installed
-- Check for path issues in Windows
-- Verify Tauri Windows prerequisites
+- **MSVC not found**: Ensure Visual Studio or Build Tools installed
+- **Missing SDK**: Install Windows 10+ SDK
+- **Path issues**: Check for spaces in paths
+- Solution: Use `dtolnay/rust-toolchain@stable` with `x86_64-pc-windows-msvc` target
 
 **macOS Build Fails**:
-- Check Xcode installation
-- Verify Apple Silicon target available
-- Review Tauri macOS requirements
+- **Xcode not installed**: Run `xcode-select --install`
+- **Apple Silicon target missing**: Manually add via `rustup target add aarch64-apple-darwin`
+- **Code signing issues**: Ensure entitlements configured in `tauri.conf.json`
+- Solution: Workflow installs all required Rust targets automatically
 
 ### Security Scan Issues
 
