@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StudentSearch } from '../StudentSearch';
 import { renderWithProviders, mockUseAppStore, mockStudents, mockObservations } from '../../test/utils';
@@ -252,7 +252,7 @@ describe('StudentSearch Component', () => {
 
   describe('Export Functionality', () => {
     it('should show export dropdown on button hover', async () => {
-      const user = userEvent.setup();
+      userEvent.setup(); // Setup user events
       renderWithProviders(<StudentSearch />);
       
       const exportButtons = screen.getAllByTitle('Export');
@@ -268,8 +268,8 @@ describe('StudentSearch Component', () => {
       mockStore.exportStudentData.mockResolvedValue('{"test": "data"}');
       
       // Mock URL.createObjectURL and document.createElement
-      global.URL.createObjectURL = vi.fn(() => 'blob:mock-url');
-      global.URL.revokeObjectURL = vi.fn();
+      (globalThis as any).URL.createObjectURL = vi.fn(() => 'blob:mock-url');
+      (globalThis as any).URL.revokeObjectURL = vi.fn();
       
       const mockLink = {
         href: '',
@@ -291,8 +291,8 @@ describe('StudentSearch Component', () => {
       mockStore.exportStudentData.mockResolvedValue('csv,data');
       
       // Mock URL.createObjectURL and document.createElement
-      global.URL.createObjectURL = vi.fn(() => 'blob:mock-url');
-      global.URL.revokeObjectURL = vi.fn();
+      (globalThis as any).URL.createObjectURL = vi.fn(() => 'blob:mock-url');
+      (globalThis as any).URL.revokeObjectURL = vi.fn();
       
       const mockLink = {
         href: '',

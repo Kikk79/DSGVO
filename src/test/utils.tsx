@@ -73,7 +73,7 @@ export const renderWithProviders = (
   ui: ReactElement,
   options: CustomRenderOptions = {}
 ) => {
-  const { initialEntries = ['/'], ...renderOptions } = options;
+  const { ...renderOptions } = options;
 
   function Wrapper({ children }: { children: React.ReactNode }) {
     return (
@@ -174,5 +174,6 @@ export const createMockStoreWithData = () => createMockStore({
   databasePath: '/mock/app/data/observations.db',
 });
 
+// eslint-disable-next-line react-refresh/only-export-components
 export * from '@testing-library/react';
 export { renderWithProviders as render };

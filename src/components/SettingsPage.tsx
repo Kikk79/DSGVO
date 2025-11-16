@@ -14,6 +14,7 @@ import {
   Laptop
 } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
+import { WebDavSettings } from './WebDavSettings';
 
 export const SettingsPage: React.FC = () => {
   const { 
@@ -39,7 +40,7 @@ export const SettingsPage: React.FC = () => {
   // Initialize local state from device config
   useEffect(() => {
     if (deviceConfig) {
-      setLocalDeviceType(deviceConfig.device_type);
+      setLocalDeviceType(deviceConfig.device_type as 'computer' | 'notebook');
       setLocalDeviceName(deviceConfig.device_name || '');
     }
   }, [deviceConfig]);
@@ -416,7 +417,10 @@ export const SettingsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Security Settings */}
+      {/* WebDAV Synchronization Section */}
+      <WebDavSettings />
+
+      {/* Security Section */}
       <div className="card">
         <div className="card-header">
           <h2 className="text-lg font-medium text-gray-900 flex items-center">

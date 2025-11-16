@@ -39,6 +39,12 @@ rand = "0.8"
 env_logger = "0.11.3"
 sha2 = "0.10"
 
+# WebDAV Sync dependencies
+reqwest = { version = "0.11", features = ["json", "multipart"] }
+quick-xml = "0.31"
+ring = "0.17"
+urlencoding = "2.1"
+
 tauri-plugin-updater = "2.0"
 
 [dev-dependencies]

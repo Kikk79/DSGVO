@@ -4,7 +4,13 @@
 **/*.rs.bk
 
 # Tauri build artifacts
-src-tauri/target/
+src-tauri/target/**/build/*
+src-tauri/target/**/deps/*
+src-tauri/target/**/incremental/*
+src-tauri/target/**/.fingerprint/*
+.chunkhound.json
+
+
 src-tauri/**/dist/
 
 # Node
@@ -40,3 +46,45 @@ Xcdoe-CLI-SDK/Command_Line_Tools_for_Xcode_11.3.1.dmg
 Xcdoe-CLI-SDK/Command_Line_Tools_for_Xcode_11.5.dmg
 Xcdoe-CLI-SDK/Command_Line_Tools_for_Xcode_16.2.dmg
 .aider*
+.chunkhound/db
+.chunkhound/db.wal
+
+.chunkhound.json
+
+# Claude Config Manager Extension - Security Rules
+# Prevents accidental commit of private conversation data
+.claude/.chats/
+.claude/.chats/**
+.claude/settings.local.json
+
+# Team-sharable Claude Code files (tracked by git):
+# .claude/settings.json     # Team settings (official Claude Code)
+# .claude/commands/         # Team slash commands (official Claude Code)
+# .claude/.plans/           # Project documentation (extension-specific)
+
+# Claude Flow generated files
+.claude/settings.local.json
+.mcp.json
+claude-flow.config.json
+.swarm/
+.hive-mind/
+.claude-flow/
+memory/
+coordination/
+memory/claude-flow-data.json
+memory/sessions/*
+!memory/sessions/README.md
+memory/agents/*
+!memory/agents/README.md
+coordination/memory_bank/*
+coordination/subtasks/*
+coordination/orchestration/*
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+claude-flow
+# Removed Windows wrapper files per user request
+hive-mind-prompt-*.txt
