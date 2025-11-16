@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SettingsPage } from '../SettingsPage';
 import { renderWithProviders, mockUseAppStore, mockDeviceConfig } from '../../test/utils';
@@ -9,7 +9,7 @@ describe('SettingsPage Component', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    global.alert = vi.fn();
+    (globalThis as any).alert = vi.fn();
     mockStore = mockUseAppStore({
       deviceConfig: mockDeviceConfig,
       databasePath: '/mock/app/data/observations.db',
@@ -188,7 +188,7 @@ describe('SettingsPage Component', () => {
       await user.click(screen.getByText('Pfad ändern'));
       
       expect(mockStore.setDatabasePath).toHaveBeenCalledWith('/new/path/to/database.db');
-      expect(global.alert).toHaveBeenCalledWith(
+      expect((globalThis as any).alert).toHaveBeenCalledWith(
         'Datenbankpfad wurde erfolgreich geändert. Bitte starten Sie die Anwendung neu, damit die Änderung wirksam wird.'
       );
     });
@@ -207,7 +207,7 @@ describe('SettingsPage Component', () => {
       
       await user.click(screen.getByText('Pfad ändern'));
       
-      expect(global.alert).toHaveBeenCalledWith('Fehler beim Ändern des Datenbankpfads: Error: Invalid path');
+      expect((globalThis as any).alert).toHaveBeenCalledWith('Fehler beim Ändern des Datenbankpfads: Error: Invalid path');
     });
 
     it('should cancel path change', async () => {
@@ -312,7 +312,7 @@ describe('SettingsPage Component', () => {
     });
 
     it('should show loading state during save', async () => {
-      const user = userEvent.setup();
+      userEvent.setup(); // Setup user events
       
       mockStore = mockUseAppStore({
         deviceConfig: mockDeviceConfig,

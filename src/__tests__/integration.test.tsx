@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+// Note: 'screen' is provided by testing-library/react and shouldn't be imported from there
+// It's a built-in global when the test environment is set up correctly
 import { renderWithProviders, mockUseAppStore } from '../test/utils';
 import App from '../App';
 

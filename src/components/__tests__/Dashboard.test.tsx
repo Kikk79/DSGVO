@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { screen } from '@testing-library/react';
 import { Dashboard } from '../Dashboard';
 import { renderWithProviders, mockUseAppStore, mockStudents, mockObservations } from '../../test/utils';
 
@@ -163,23 +162,21 @@ describe('Dashboard Component', () => {
   });
 
   describe('Navigation', () => {
-    it('should navigate to new observation on card click', async () => {
-      const user = userEvent.setup();
+    it('should navigate to new observation on card click', () => {
       renderWithProviders(<Dashboard />);
-      
+
       const newObservationCard = screen.getByText('Neue Beobachtung').closest('a');
       expect(newObservationCard).toHaveAttribute('href', '/neue-beobachtung');
     });
 
-    it('should navigate to student search on card click', async () => {
-      const user = userEvent.setup();
+    it('should navigate to student search on card click', () => {
       renderWithProviders(<Dashboard />);
       
       const studentSearchCard = screen.getByText('Schüler finden').closest('a');
       expect(studentSearchCard).toHaveAttribute('href', '/schueler-suchen');
     });
 
-    it('should navigate to student search from empty state button', async () => {
+    it('should navigate to student search from empty state button', () => {
       mockStore = mockUseAppStore({
         students: mockStudents,
         observations: [],
