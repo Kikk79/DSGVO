@@ -1,8 +1,24 @@
 {
   "name": "schuelerbeobachtung",
+  "version": "0.1.1",
   "private": true,
-  "version": "0.1.0",
+  "description": "apk",
+  "homepage": "https://github.com/Kikk79/DSGVOAPK#readme",
+  "bugs": {
+    "url": "https://github.com/Kikk79/DSGVOAPK/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kikk79/DSGVOAPK.git"
+  },
+  "license": "ISC",
+  "author": "",
   "type": "module",
+  "main": "postcss.config.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
@@ -10,12 +26,17 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "tauri:build:versioned": "npm run tauri:build && node scripts/increment-artifacts.js",
+    "increment:artifacts": "node scripts/increment-artifacts.js",
     "test": "vitest",
     "test:ui": "vitest --ui",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint . --ext ts,tsx --fix"
   },
   "dependencies": {
+    "@capacitor/android": "^7.4.3",
+    "@capacitor/cli": "^7.4.3",
+    "@capacitor/core": "^7.4.3",
     "@fullcalendar/daygrid": "^6.1.19",
     "@fullcalendar/interaction": "^6.1.19",
     "@fullcalendar/list": "^6.1.19",
@@ -26,6 +47,7 @@
     "@tauri-apps/plugin-fs": ">=2.0.0",
     "@tauri-apps/plugin-notification": ">=2.0.0",
     "@tauri-apps/plugin-shell": ">=2.0.0",
+    "build": "^0.1.4",
     "date-fns": "^3.0.6",
     "lucide-react": "^0.294.0",
     "react": "^18.2.0",
@@ -36,6 +58,7 @@
     "zustand": "^4.4.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.56.1",
     "@tauri-apps/cli": "^2.7.1",
     "@testing-library/jest-dom": "^6.1.5",
     "@testing-library/react": "^14.3.1",
