@@ -88,3 +88,4 @@ coordination/orchestration/*
 claude-flow
 # Removed Windows wrapper files per user request
 hive-mind-prompt-*.txt
+src-tauri/target/.rustc_info.json
