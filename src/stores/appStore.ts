@@ -44,8 +44,25 @@ export interface SyncStatus {
 }
 
 export interface DeviceConfig {
-  device_type: 'computer' | 'notebook';
+  device_type: string; // "computer" or "notebook"
   device_name?: string;
+}
+
+export interface WebDavConfig {
+  url: string;
+  username: string;
+  configured: boolean;
+  active: boolean;
+  lastSync: string | null;
+}
+
+export type WebDavSyncStatus = 'idle' | 'syncing' | 'success' | 'error';
+
+export interface WebDavSyncState {
+  status: WebDavSyncStatus;
+  lastSyncTime: string | null;
+  error: string | null;
+  config: WebDavConfig | null;
 }
 
 export interface ActivePin {
@@ -225,6 +242,20 @@ interface AppState {
   getDatabasePath: () => Promise<void>;
   // eslint-disable-next-line no-unused-vars
   setDatabasePath: (newPath: string) => Promise<void>;
+  
+  // WebDAV Sync Management
+  webdavSync: WebDavSyncState;
+  // eslint-disable-next-line no-unused-vars
+  configureWebDav: (url: string, username: string, password: string) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  testWebDavConnection: (url: string, username: string, password: string) => Promise<boolean>;
+  triggerManualSync: () => Promise<void>;
+  getWebDavSyncStatus: () => Promise<void>;
+  disableWebDavSync: () => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  setSyncStatus: (status: WebDavSyncStatus) => void;
+  // eslint-disable-next-line no-unused-vars
+  setSyncError: (error: string | null) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -861,5 +892,183 @@ export const useAppStore = create<AppState>((set, get) => ({
     
     // Persist to localStorage
     localStorage.setItem('calendarFilters', JSON.stringify(newFilters));
+  },
+  
+  // WebDAV Sync Actions
+  webdavSync: {
+    status: 'idle',
+    lastSyncTime: null,
+    error: null,
+    config: null,
+  },
+  
+  configureWebDav: async (url: string, username: string, password: string) => {
+    set({ 
+      webdavSync: { 
+        ...get().webdavSync, 
+        status: 'syncing',
+        error: null 
+      } 
+    });
+    
+    try {
+      const result = await invoke('configure_webdav', {
+        url,
+        username,
+        password,
+      }) as string;
+      
+      console.log('✅ WebDAV configured:', result);
+      
+      // Reload status
+      await get().getWebDavSyncStatus();
+      
+      set({ 
+        webdavSync: { 
+          ...get().webdavSync, 
+          status: 'success',
+          error: null 
+        } 
+      });
+    } catch (error) {
+      console.error('❌ WebDAV configuration failed:', error);
+      set({ 
+        webdavSync: { 
+          ...get().webdavSync, 
+          status: 'error',
+          error: `Configuration failed: ${error}` 
+        } 
+      });
+      throw error;
+    }
+  },
+  
+  testWebDavConnection: async (url: string, username: string, password: string) => {
+    try {
+      const result = await invoke('test_webdav_connection', {
+        url,
+        username,
+        password,
+      }) as boolean;
+      
+      return result;
+    } catch (error) {
+      console.error('❌ WebDAV connection test failed:', error);
+      throw error;
+    }
+  },
+  
+  triggerManualSync: async () => {
+    set({ 
+      webdavSync: { 
+        ...get().webdavSync, 
+        status: 'syncing',
+        error: null 
+      } 
+    });
+    
+    try {
+      const result = await invoke('trigger_manual_sync') as string;
+      console.log('✅ Manual sync completed:', result);
+      
+      // Reload status to get updated lastSync timestamp
+      await get().getWebDavSyncStatus();
+      
+      // Reload data that might have changed
+      await Promise.all([
+        get().loadStudents(),
+        get().loadClasses(),
+        get().loadCategories(),
+      ]);
+      
+      set({ 
+        webdavSync: { 
+          ...get().webdavSync, 
+          status: 'success',
+          error: null 
+        } 
+      });
+    } catch (error) {
+      console.error('❌ Manual sync failed:', error);
+      set({ 
+        webdavSync: { 
+          ...get().webdavSync, 
+          status: 'error',
+          error: `Sync failed: ${error}` 
+        } 
+      });
+      throw error;
+    }
+  },
+  
+  getWebDavSyncStatus: async () => {
+    try {
+      const status = await invoke('get_webdav_sync_status') as {
+        configured: boolean;
+        active: boolean;
+        last_sync: string | null;
+        url: string | null;
+        username: string | null;
+      };
+      
+      set({ 
+        webdavSync: {
+          status: status.active ? 'idle' : 'idle',
+          lastSyncTime: status.last_sync,
+          error: null,
+          config: status.configured && status.url && status.username ? {
+            url: status.url,
+            username: status.username,
+            configured: status.configured,
+            active: status.active,
+            lastSync: status.last_sync,
+          } : null,
+        }
+      });
+    } catch (error) {
+      console.error('❌ Failed to get WebDAV sync status:', error);
+      set({ 
+        webdavSync: { 
+          ...get().webdavSync, 
+          error: `Failed to get status: ${error}` 
+        } 
+      });
+    }
+  },
+  
+  disableWebDavSync: async () => {
+    try {
+      await invoke('disable_webdav_sync');
+      
+      set({ 
+        webdavSync: {
+          status: 'idle',
+          lastSyncTime: null,
+          error: null,
+          config: null,
+        }
+      });
+    } catch (error) {
+      console.error('❌ Failed to disable WebDAV sync:', error);
+      throw error;
+    }
+  },
+  
+  setSyncStatus: (status: WebDavSyncStatus) => {
+    set({ 
+      webdavSync: { 
+        ...get().webdavSync, 
+        status 
+      } 
+    });
+  },
+  
+  setSyncError: (error: string | null) => {
+    set({ 
+      webdavSync: { 
+        ...get().webdavSync, 
+        error 
+      } 
+    });
   },
 }));

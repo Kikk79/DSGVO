@@ -103,8 +103,6 @@ describe('ObservationForm Component', () => {
     it('should populate category options', () => {
       renderWithProviders(<ObservationForm />);
       
-      const categorySelect = screen.getByLabelText('Kategorie');
-      
       expect(screen.getByText('Sozial')).toBeInTheDocument();
       expect(screen.getByText('Fachlich')).toBeInTheDocument();
       expect(screen.getByText('Verhalten')).toBeInTheDocument();
@@ -385,8 +383,8 @@ describe('ObservationForm Component', () => {
     });
 
     it('should show loading state during submission', async () => {
-      const user = userEvent.setup();
-      
+      userEvent.setup(); // Setup user events
+
       // Mock loading state
       mockStore = mockUseAppStore({
         students: mockStudents,

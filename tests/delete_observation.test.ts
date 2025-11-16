@@ -27,21 +27,22 @@ const mockInvoke = {
       case 'get_observation':
         return this.observations.find(obs => obs.id === args.observationId) || null;
         
-      case 'delete_observation':
+      case 'delete_observation': {
         const index = this.observations.findIndex(obs => obs.id === args.observationId);
         if (index === -1) {
           throw new Error(`Observation with ID ${args.observationId} not found`);
         }
-        
+
         const obs = this.observations[index];
         if (obs.author_id !== 1 && !args.forceDelete) {
           throw new Error('Access denied: Only the author can delete this observation. Use force_delete for administrative override.');
         }
-        
+
         this.observations.splice(index, 1);
         return;
+      }
         
-      case 'create_observation':
+      case 'create_observation': {
         const newObs = {
           id: Math.max(...this.observations.map(o => o.id), 0) + 1,
           student_id: args.studentId,
@@ -55,7 +56,7 @@ const mockInvoke = {
         };
         this.observations.push(newObs);
         return newObs;
-        
+      }
       default:
         throw new Error(`Unknown command: ${command}`);
     }
