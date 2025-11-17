@@ -2,7 +2,7 @@ name: PR Quality Gate
 
 on:
   pull_request:
-    branches: [main, master, Dev]
+    branches: [master, Dev]
   pull_request_target:
     types: [opened, synchronize, reopened]
 
