@@ -40,7 +40,7 @@ env_logger = "0.11.3"
 sha2 = "0.10"
 
 # WebDAV Sync dependencies
-reqwest = { version = "0.11", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
 quick-xml = "0.31"
 ring = "0.17"
 urlencoding = "2.1"
