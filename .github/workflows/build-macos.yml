@@ -42,7 +42,7 @@ jobs:
         run: npm run tauri build ${{ matrix.args }}
 
       - name: Upload artifacts (macOS)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.name }}
           path: |
