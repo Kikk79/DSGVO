@@ -39,7 +39,7 @@ ${StrLoc}
 !define SIDEBARIMAGE ""
 !define HEADERIMAGE ""
 !define MAINBINARYNAME "schuelerbeobachtung"
-!define MAINBINARYSRCPATH "C:\Users\klaus\Documents\GH\DSGVO\src-tauri\target\release\schuelerbeobachtung.exe"
+!define MAINBINARYSRCPATH "C:\Users\klaus\Documents\GIT\DSGVO\src-tauri\target\release\schuelerbeobachtung.exe"
 !define BUNDLEID "com.school.schuelerbeobachtung"
 !define COPYRIGHT ""
 !define OUTFILE "nsis-output.exe"
@@ -56,7 +56,7 @@ ${StrLoc}
 !define MANUKEY "Software\${MANUFACTURER}"
 !define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
 !define UNINSTALLERSIGNCOMMAND ""
-!define ESTIMATEDSIZE "18073"
+!define ESTIMATEDSIZE "20915"
 !define STARTMENUFOLDER ""
 
 Var PassiveMode
@@ -441,7 +441,7 @@ FunctionEnd
 ;Languages
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_RESERVEFILE_LANGDLL
-  !include "C:\Users\klaus\Documents\GH\DSGVO\src-tauri\target\release\nsis\x64\English.nsh"
+  !include "C:\Users\klaus\Documents\GIT\DSGVO\src-tauri\target\release\nsis\x64\English.nsh"
 
 Function .onInit
   ${GetOptions} $CMDLINE "/P" $PassiveMode
