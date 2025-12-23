@@ -48,7 +48,7 @@ urlencoding = "2.1"
 tauri-plugin-updater = "2.0"
 
 [dev-dependencies]
-tempfile = "3.8"
+tempfile = "3.23"
 tokio-test = "0.4"
 futures = "0.3"
 
