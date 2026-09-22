@@ -201,6 +201,7 @@ pub struct WebDavSyncManager {
     webdav_client: Arc<Mutex<Option<WebDavClient>>>,
     device_id: String,
     last_sync: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
+    delete_after_import: Arc<Mutex<bool>>,
 }
 
 impl WebDavSyncManager {
@@ -209,6 +210,7 @@ impl WebDavSyncManager {
             webdav_client: Arc::new(Mutex::new(None)),
             device_id,
             last_sync: Arc::new(Mutex::new(None)),
+            delete_after_import: Arc::new(Mutex::new(true)),
         }
     }
 
@@ -235,6 +237,12 @@ impl WebDavSyncManager {
     /// Check if WebDAV is configured
     pub async fn is_configured(&self) -> bool {
         self.webdav_client.lock().await.is_some()
+    }
+
+    /// Configure whether imported changesets should be deleted from WebDAV
+    pub async fn set_delete_after_import(&self, enabled: bool) {
+        let mut delete_after_import = self.delete_after_import.lock().await;
+        *delete_after_import = enabled;
     }
 
     /// Sync on app startup
@@ -362,6 +370,8 @@ impl WebDavSyncManager {
         println!("🔑 Current device ID: {}", self.device_id);
         println!("📂 Found {} file(s) on WebDAV to process", files.len());
 
+        let delete_after_import = *self.delete_after_import.lock().await;
+
         for filename in files {
             println!("📄 Processing: {}", filename);
             // Skip our own changesets
@@ -379,8 +389,14 @@ impl WebDavSyncManager {
                             println!("✅ Imported: {}", filename);
                             imported_count += 1;
 
-                            // Optionally delete imported changeset to keep WebDAV clean
-                            // let _ = webdav_client.delete_file(&filename).await;
+                            if delete_after_import {
+                                // Delete imported changeset to keep WebDAV clean
+                                if let Err(e) = webdav_client.delete_file(&filename).await {
+                                    eprintln!("⚠️ Failed to delete {} after import: {}", filename, e);
+                                } else {
+                                    println!("🗑️ Deleted imported changeset: {}", filename);
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("⚠️ Failed to import {}: {}", filename, e);

@@ -12,7 +12,7 @@ Commands for future builds:
 - **Betriebssystem**: Windows 10 (1909+), macOS 10.15+, Ubuntu 18.04+
 - **RAM**: 4 GB (8 GB empfohlen)
 - **Speicher**: 500 MB für Anwendung + Daten
-- **Netzwerk**: WiFi für P2P-Synchronisation (optional)
+- **Netzwerk**: Internetzugang nur für optionale WebDAV-Synchronisation (z. B. Port 8443)
 
 ### Entwicklungsumgebung
 
@@ -39,7 +39,7 @@ Commands for future builds:
 
 3. **Erste Einrichtung**
    - Anwendung starten
-   - Verschlüsselung wird automatisch initialisiert
+   - Datenbank wird automatisch initialisiert
    - Gerät wird automatisch registriert
 
 ### macOS
@@ -234,21 +234,7 @@ Standard-Speicherorte:
 
 ### Netzwerk-Konfiguration
 
-```json
-{
-  \"p2p\": {
-    \"discovery_port\": 5353,
-    \"sync_port\": 8443,
-    \"enabled\": true,
-    \"auto_sync\": false
-  },
-  \"security\": {
-    \"require_2fa\": false,
-    \"certificate_pinning\": true,
-    \"session_timeout\": 3600
-  }
-}
-```
+Die Synchronisation erfolgt optional über WebDAV (konfigurierbar in der App). In dieser Umgebung läuft der WebDAV-Server auf Port 8443.
 
 ### DSGVO-Einstellungen
 
@@ -321,18 +307,9 @@ echo $DISPLAY
 export DISPLAY=:0
 ```
 
-#### Keyring/Credential Store Fehler
+#### Credential Store Hinweise
 
-```bash
-# Ubuntu: GNOME Keyring installieren
-sudo apt install gnome-keyring
-
-# macOS: Keychain Access prüfen
-# Anwendungen → Dienstprogramme → Schlüsselbundverwaltung
-
-# Windows: Credential Manager verfügbar
-# Systemsteuerung → Anmeldeinformationsverwaltung
-```
+Die Anwendung speichert WebDAV-Zugangsdaten lokal in der Datenbank (Base64-codiert, nicht verschlüsselt). Stellen Sie sicher, dass das Gerät entsprechend geschützt ist.
 
 ### Performance-Optimierung
 

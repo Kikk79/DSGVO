@@ -435,11 +435,11 @@ describe('Delete Functionality', () => {
 
 ### Integration Tests
 
-#### P2P-Synchronisation
+#### WebDAV-Synchronisation / Export-Import
 ```rust
 #[tokio::test]
-async fn test_delete_synchronization() {
-    // Szenario: Löschung auf einem Gerät, Sync auf anderes
+async fn test_delete_sync_via_changeset() {
+    // Szenario: Löschung auf einem Gerät, Changeset-Export/Import auf anderes
     // Erwartet: Konsistente Löschung auf allen synchronisierten Geräten
 }
 

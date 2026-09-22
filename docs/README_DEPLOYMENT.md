@@ -52,7 +52,7 @@ rm -rf ~/.local/share/schuelerbeobachtung
 
 - **Technical Issues**: Check [DEPLOYMENT.md](./DEPLOYMENT.md) troubleshooting section
 - **GDPR Compliance**: See main README.md for privacy documentation
-- **Security**: All data encrypted with ChaCha20Poly1305
+- **Security**: Data stored locally in plaintext
 
 ---
 

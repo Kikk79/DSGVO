@@ -45,10 +45,10 @@ The DSGVO project is a **hybrid desktop/mobile application** built with Tauri + 
 - Capacitor 7.4.3 (Android APK builds)
 - Cross-platform compatibility layer
 
-**Architectural Pattern**: **Hybrid Local-First with Cloud Sync**
+**Architectural Pattern**: **Hybrid Local-First with WebDAV Sync**
 - Primary: Local SQLite database
 - Sync: WebDAV-based changeset synchronization
-- Migration: From P2P sync (disabled) to WebDAV cloud sync
+- Migration: WebDAV changeset synchronization
 
 ---
 
@@ -91,11 +91,10 @@ The DSGVO project is a **hybrid desktop/mobile application** built with Tauri + 
 /src-tauri/src/
   ├── main.rs           # Tauri app entry, command handlers (1,365 lines)
   ├── database.rs       # SQLite operations, migrations
-  ├── crypto.rs         # Device ID, encryption utilities
+  ├── crypto.rs         # Device ID, checksum utilities (no encryption)
   ├── audit.rs          # GDPR audit logging
   ├── gdpr.rs           # GDPR compliance operations
   ├── webdav_sync.rs    # WebDAV synchronization
-  ├── p2p.rs.disabled   # Legacy P2P sync (deprecated)
   └── tests/            # Integration tests
       ├── mod.rs
       └── integration/
@@ -265,15 +264,15 @@ The DSGVO project is a **hybrid desktop/mobile application** built with Tauri + 
 - **Impact**: Anyone with device access can view data
 - **Recommendation**: Add device PIN/password protection
 
-**2. Encryption Disabled**:
-- **Issue**: File `ENCRYPTION_DISABLED.md` indicates removed feature
-- **Impact**: Data at rest is unencrypted
-- **Recommendation**: Re-enable database encryption
+**2. Plaintext Storage**:
+- **Issue**: Data at rest is plaintext
+- **Impact**: Data exposure if device is compromised
+- **Recommendation**: Document plaintext storage and enforce device access controls
 
 **3. WebDAV Credentials**:
 - **Issue**: Stored in SQLite (base64 encoded, not encrypted)
 - **Impact**: Credentials exposed if database accessed
-- **Recommendation**: Use OS keyring for credential storage
+- **Recommendation**: Review credential storage and restrict access via OS policies
 
 **4. No Input Sanitization**:
 - **Issue**: No explicit SQL injection prevention (relies on SQLx)
@@ -389,16 +388,16 @@ src-tauri/src/tests/
 - **Action**: Systematic test writing campaign
 
 **5. Security Gaps (P0)**
-- **Issue**: No authentication, disabled encryption
+- **Issue**: No authentication, plaintext storage
 - **Effort**: 40-80 hours
 - **Impact**: Data security, compliance
-- **Action**: Re-enable encryption, add auth layer
+- **Action**: Document plaintext storage and add auth layer
 
 ### 7.2 Medium-Priority Debt
 
-**1. Disabled P2P Sync Code**
-- **Issue**: Legacy code still in repo (`.disabled` files)
-- **Effort**: 2-4 hours
+**1. Legacy Sync Code**
+- **Issue**: Legacy sync code removed from repo
+- **Effort**: —
 - **Action**: Remove completely or extract to separate branch
 
 **2. No Repository Pattern**
@@ -469,8 +468,7 @@ src-tauri/src/tests/
 - ⚠️ Reqwest: 0.11 (consider upgrading to 0.12)
 
 **Disabled Dependencies**:
-- ❌ P2P libraries: Removed (rustls, mdns-sd)
-- ❌ Encryption: Commented out (keyring, chacha20poly1305)
+- ❌ Encryption: Removed
 
 **Vulnerability Assessment**:
 - No known critical vulnerabilities
@@ -519,9 +517,9 @@ src-tauri/src/tests/
 ### 10.1 Immediate Actions (Next 2 weeks)
 
 **P0 - Critical**:
-1. ✅ Re-enable database encryption
+1. ✅ Document plaintext storage and device access controls
 2. ✅ Add authentication layer (device PIN)
-3. ✅ Fix WebDAV credential storage (use keyring)
+3. ✅ Review WebDAV credential storage
 4. ✅ Split monolithic store into modules
 
 **P1 - High Priority**:
@@ -594,7 +592,7 @@ The DSGVO project demonstrates **solid architectural foundations** with clear se
 **Primary Concerns**:
 - Monolithic files (store, main.rs)
 - Low test coverage (~35%)
-- Security gaps (no auth, disabled encryption)
+- Security gaps (no auth, plaintext storage)
 - Technical debt accumulation
 - Missing performance optimization
 
@@ -613,7 +611,7 @@ The DSGVO project demonstrates **solid architectural foundations** with clear se
 **Security**:
 - Current: C+ (60/100)
 - Target: A- (85/100)
-- Key: Re-enable encryption, add auth
+- Key: Document plaintext storage, add auth
 
 **Performance**:
 - Current: B (80/100)

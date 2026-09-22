@@ -6,7 +6,7 @@
 
 ```bash
 # Read these files first for immediate project context:
-cat README.md package.json src-tauri/Cargo.toml ENCRYPTION_DISABLED.md
+cat README.md package.json src-tauri/Cargo.toml
 ```
 
 **Development Workflow:**
@@ -47,10 +47,10 @@ npm run tauri:build
 
 **Architecture Fundamentals:**
 
-- ❌ **NO P2P FUNCTIONALITY** - Removed in favor of EXPORT/IMPORT approach
+- ❌ **No direct device-to-device sync** - Use export/import or WebDAV sync
 - ✅ **Local-first architecture** - No server dependencies
 - ✅ **GDPR by design** - Privacy-first with audit trails
-- ✅ **Encryption disabled** - Currently plaintext storage (see ENCRYPTION_DISABLED.md)
+- ✅ **No encryption at rest** - Data is stored in plaintext
 - ✅ **Tauri 2.0 framework** - Rust backend + React TypeScript frontend
 - ✅ **SQLite database** - Local storage with potential for export/import synchronization
 - ✨ **NEW: User-Defined Categories** - Complete color-customizable category management system
@@ -83,7 +83,7 @@ npm run tauri:build
 - Chrono 0.4 (Date/Time)
 - UUID 1.0 (Identifiers)
 - tracing 0.1 (Logging)
-- ❌ **Encryption Dependencies Disabled** (keyring, chacha20poly1305)
+- ❌ **Crypto dependencies removed**
 
 ### Data Model
 
@@ -122,7 +122,7 @@ CREATE TABLE categories (
     source_device_id TEXT NOT NULL DEFAULT ''
 );
 
--- Observations (NO ENCRYPTION)
+-- Observations (PLAINTEXT)
 CREATE TABLE observations (
     id INTEGER PRIMARY KEY,
     student_id INTEGER NOT NULL,
@@ -170,7 +170,7 @@ DSGVO/
 │   ├── src/
 │   │   ├── main.rs              # Tauri commands and entry point
 │   │   ├── database.rs          # SQLite operations
-│   │   ├── crypto.rs            # Encryption (DISABLED)
+│   │   ├── crypto.rs            # Device ID + checksum utilities (no encryption)
 │   │   ├── audit.rs             # GDPR audit logging
 │   │   └── gdpr.rs              # Data protection functions
 │   ├── Cargo.toml               # Rust dependencies
@@ -188,7 +188,6 @@ DSGVO/
 │   ├── project_structure.md     # File organization
 │   └── task_completion_requirements.md  # Quality gates
 ├── package.json                 # Frontend dependencies
-├── ENCRYPTION_DISABLED.md       # Critical: Encryption status
 └── README.md                    # User-facing documentation
 ```
 
@@ -423,7 +422,7 @@ npm run tauri:build
 
 **Current Limitations:**
 
-- Encryption disabled (plaintext storage)
+- No encryption at rest (plaintext storage)
 - Single-user mode (hardcoded author_id = 1)
 - No server/cloud functionality
 
@@ -513,7 +512,7 @@ fn test_soft_delete_preserves_statistics() {
 
 #[test]
 fn test_database_migration_handling() {
-    // Test migration from encrypted to plaintext
+    // Test migration from legacy format to plaintext
 }
 ```
 
@@ -579,16 +578,16 @@ Automatically created on first run with professional color schemes:
 
 ### Security Status
 
-- ❌ **ENCRYPTION DISABLED** - All data stored in plaintext
+- ❌ **No encryption at rest** - All data stored in plaintext
 - ❌ **Single-user assumption** - No authentication system
 - ⚠️ **Database file readable** - SQLite file contains plaintext data
 - ✅ **GDPR compliance maintained** - Deletion and audit functions work
 
 ### Data Migration Risks
 
-- **Existing encrypted databases** cannot be read by current version
+- **Legacy encrypted databases** from older builds cannot be read by current version
 - **Fresh database creation** required for first run
-- **No automatic migration** from encrypted to plaintext format
+- **No automatic migration** from legacy encrypted to plaintext format
 - **Backup essential** before any deployment
 
 ### Development Dependencies
@@ -651,7 +650,6 @@ npm run tauri:build        # MUST succeed completely
 - `docs/API.md` - Complete Tauri command reference
 - `docs/DELETE_FEATURES.md` - GDPR deletion implementation
 - `docs/DPIA.md` - Data Protection Impact Assessment
-- `ENCRYPTION_DISABLED.md` - Current security status
 - `.serena/memories/task_completion_requirements.md` - Quality gates
 
 **Development Files to Read First:**
@@ -659,7 +657,6 @@ npm run tauri:build        # MUST succeed completely
 1. `README.md` - Project overview and installation
 2. `package.json` - Frontend dependencies and scripts
 3. `src-tauri/Cargo.toml` - Backend dependencies
-4. `ENCRYPTION_DISABLED.md` - Critical security context
 
 **Key Implementation Files:**
 
@@ -671,7 +668,7 @@ npm run tauri:build        # MUST succeed completely
 
 ---
 
-**🎯 REMEMBER**: This is a GDPR-compliant student observation system with NO P2P functionality. Features **UNIFIED SYNCHRONIZATION SYSTEM** with consolidated export/import through single `/sync` interface. Supports "All Data" exports and dual export modes (Changeset/Full). ✨ **NEW: USER-DEFINED CATEGORIES** with complete color customization system. Encryption is currently DISABLED - all data stored in plaintext. Always run quality gates before task completion!
+**🎯 REMEMBER**: This is a GDPR-compliant student observation system with no direct device-to-device sync. Features **UNIFIED SYNCHRONIZATION SYSTEM** with consolidated export/import through single `/sync` interface. Supports "All Data" exports and dual export modes (Changeset/Full). ✨ **NEW: USER-DEFINED CATEGORIES** with complete color customization system. Data is stored in plaintext (no encryption at rest). Always run quality gates before task completion!
 
 **📅 Last Updated**: 2025-01-24 • **🔒 GDPR-Compliant** • **⚠️ No-Crypto Version** • **🔄 Unified Sync** • **🎨 Custom Categories**
 

@@ -38,12 +38,10 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 3. Add initialization guards for complex loading sequences
 4. Always include cleanup functions in useEffect hooks
 
-### 🔓 Security Status: Encryption Disabled
+### 🔓 Security Status: Plaintext Storage
 **CRITICAL**: All data is currently stored in **PLAINTEXT**
 - Student observations are unencrypted in SQLite database
 - No password protection on database file
-- Encryption was disabled due to Linux keyring compatibility issues
-- See `ENCRYPTION_DISABLED.md` for full details
 
 **Impact**: Suitable for testing/development, consider security implications for production use
 
@@ -131,7 +129,7 @@ Observation { id, student_id, category, text, tags } // PLAINTEXT stored
 
 ## 🔄 Synchronization System
 
-### File-Based Sync (Replaced P2P)
+### File-Based Sync
 **Location**: `/sync` route via `UnifiedSyncManager.tsx`
 - **Changeset Export**: Incremental changes (.dat files)
 - **Full Export**: Complete database backup (.json files)
@@ -414,7 +412,6 @@ npm run tauri:build
 
 ### Technical Reference
 - `Claude.md` - Complete technical documentation (670+ lines)
-- `ENCRYPTION_DISABLED.md` - Security status and implications
 - `README.md` - User-facing project overview
 
 ### Project Memory (.serena/memories/)
@@ -442,6 +439,6 @@ npm run tauri:build
 
 ---
 
-**🎯 Remember**: This is a GDPR-compliant student observation system with unified file-based synchronization, user-defined categories, and currently disabled encryption. Always run quality gates before task completion!
+**🎯 Remember**: This is a GDPR-compliant student observation system with unified file-based synchronization, user-defined categories, and plaintext storage. Always run quality gates before task completion!
 
-**📅 Last Updated**: August 2025 • **🔒 GDPR-Compliant** • **⚠️ Encryption Disabled** • **🔄 File-Based Sync**
+**📅 Last Updated**: February 2026 • **🔒 GDPR-Compliant** • **⚠️ Plaintext Storage** • **🔄 File-Based Sync**

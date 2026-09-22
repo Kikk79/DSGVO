@@ -3,7 +3,7 @@
 
 mod crypto;
 mod database;
-// mod p2p; // Removed - using file-based changeset sync
+// Legacy sync module removed - using file-based changeset sync
 mod audit;
 mod gdpr;
 mod webdav_sync;
@@ -15,7 +15,7 @@ use base64::Engine;
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
-// use p2p::ActivePin; // Removed - using file-based changeset sync
+// Legacy sync types removed - using file-based changeset sync
 
 // Data structures
 #[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
@@ -134,7 +134,7 @@ pub struct CalendarObservation {
 pub struct AppState {
     pub db: Arc<Mutex<database::Database>>,
     pub crypto: Arc<crypto::CryptoManager>,
-    // p2p: Removed - using file-based changeset sync
+    // Legacy sync state removed - using file-based changeset sync
     pub audit: Arc<audit::AuditLogger>,
     pub gdpr: Arc<gdpr::GdprManager>,
     pub webdav_sync: Arc<Mutex<Option<Arc<webdav_sync::WebDavSyncManager>>>>,
@@ -267,7 +267,7 @@ async fn export_student_data(
     }
 }
 
-// P2P sync commands removed - using file-based changeset sync
+// Legacy sync commands removed - using file-based changeset sync
 
 #[tauri::command]
 async fn export_changeset(state: tauri::State<'_, AppState>) -> Result<String, String> {
@@ -947,6 +947,11 @@ async fn configure_webdav(
         .await
         .map_err(|e| e.to_string())?;
 
+    let delete_after_import = db
+        .get_webdav_delete_after_import()
+        .await
+        .unwrap_or(true);
+
     // Initialize WebDAV sync manager
     let device_id = db.get_device_id();
     drop(db); // Release lock
@@ -956,6 +961,7 @@ async fn configure_webdav(
         .configure(url, username, password)
         .await
         .map_err(|e| e.to_string())?;
+    sync_manager.set_delete_after_import(delete_after_import).await;
 
     // Store sync manager in state
     let mut webdav_sync = state.webdav_sync.lock().await;
@@ -1056,6 +1062,25 @@ async fn test_webdav_connection(
 }
 
 #[tauri::command]
+async fn test_webdav_connection_configured(
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let db = state.db.lock().await;
+    let credentials = db
+        .get_webdav_credentials()
+        .await
+        .map_err(|e| e.to_string())?;
+    drop(db);
+
+    if let Some((url, username, password)) = credentials {
+        let client = webdav_sync::WebDavClient::new(url, username, password);
+        client.test_connection().await.map_err(|e| e.to_string())
+    } else {
+        Err("WebDAV not configured".to_string())
+    }
+}
+
+#[tauri::command]
 async fn trigger_manual_sync(state: tauri::State<'_, AppState>) -> Result<String, String> {
     let webdav_sync = state.webdav_sync.lock().await;
 
@@ -1126,6 +1151,11 @@ async fn get_webdav_sync_status(
         .await
         .map_err(|e| e.to_string())?;
 
+    let delete_after_import = db
+        .get_webdav_delete_after_import()
+        .await
+        .unwrap_or(true);
+
     // Check if sync manager is active
     let webdav_sync = state.webdav_sync.lock().await;
     let is_active = webdav_sync.is_some();
@@ -1136,7 +1166,27 @@ async fn get_webdav_sync_status(
         "last_sync": last_sync,
         "url": credentials.as_ref().map(|(url, _, _)| url.clone()),
         "username": credentials.as_ref().map(|(_, username, _)| username.clone()),
+        "delete_after_import": delete_after_import,
     }))
+}
+
+#[tauri::command]
+async fn set_webdav_delete_after_import(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let db = state.db.lock().await;
+    db.set_webdav_delete_after_import(enabled)
+        .await
+        .map_err(|e| e.to_string())?;
+    drop(db);
+
+    let webdav_sync = state.webdav_sync.lock().await;
+    if let Some(sync_manager) = webdav_sync.as_ref() {
+        sync_manager.set_delete_after_import(enabled).await;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1202,7 +1252,7 @@ fn main() {
             let state = AppState {
                 db: Arc::new(Mutex::new(db)),
                 crypto,
-                // p2p: Removed - using file-based changeset sync
+                // Legacy sync state removed - using file-based changeset sync
                 audit,
                 gdpr,
                 webdav_sync: Arc::new(Mutex::new(None)),
@@ -1215,6 +1265,8 @@ fn main() {
                 let db_lock = state.db.lock().await;
                 if let Ok(Some((url, username, password))) = db_lock.get_webdav_credentials().await
                 {
+                    let delete_after_import =
+                        db_lock.get_webdav_delete_after_import().await.unwrap_or(true);
                     let device_id = db_lock.get_device_id();
                     drop(db_lock);
 
@@ -1224,6 +1276,9 @@ fn main() {
                         .await
                         .is_ok()
                     {
+                        sync_manager
+                            .set_delete_after_import(delete_after_import)
+                            .await;
                         let mut webdav_sync = state.webdav_sync.lock().await;
                         *webdav_sync = Some(sync_manager.clone());
                         drop(webdav_sync);
@@ -1337,9 +1392,7 @@ fn main() {
             get_assessments_comprehensive,
             export_assessments_csv,
             get_calendar_observations,
-            // P2P commands removed - using file-based changeset sync:
-            // start_p2p_sync, stop_p2p_sync, pair_device, generate_pairing_pin,
-            // get_pairing_code, get_current_pairing_pin, clear_pairing_pin, trigger_sync
+            // Legacy sync commands removed - using file-based changeset sync
             export_changeset,
             import_changeset,
             export_changeset_to_file,
@@ -1355,8 +1408,10 @@ fn main() {
             // WebDAV Sync commands
             configure_webdav,
             test_webdav_connection,
+            test_webdav_connection_configured,
             trigger_manual_sync,
             get_webdav_sync_status,
+            set_webdav_delete_after_import,
             disable_webdav_sync
         ])
         .run(tauri::generate_context!())

@@ -1,0 +1,59 @@
+{
+  "changeset": {
+    "changeset_id": "973f1a2c-974e-4b11-8294-c2037c0e4e83",
+    "created_at": "2025-08-21T11:29:24.533867300+00:00",
+    "data": {
+      "classes": [
+        {
+          "created_at": "2025-08-17T14:25:47.102196500Z",
+          "id": 1,
+          "name": "2c",
+          "school_year": "2024/25",
+          "source_device_id": "3b4c4332-bb86-4822-8596-f335607fa446",
+          "updated_at": "2025-08-17T14:25:47.102196500Z"
+        }
+      ],
+      "observations": [],
+      "students": [
+        {
+          "class_id": 1,
+          "created_at": "2025-08-17T14:25:58.729438300Z",
+          "first_name": "hnsasd",
+          "id": 1,
+          "last_name": "er1r",
+          "source_device_id": "3b4c4332-bb86-4822-8596-f335607fa446",
+          "status": "active",
+          "updated_at": "2025-08-17T14:25:58.729438300Z"
+        },
+        {
+          "class_id": 1,
+          "created_at": "2025-08-17T15:31:32.898119Z",
+          "first_name": "hj,vm",
+          "id": 2,
+          "last_name": "gh,j",
+          "source_device_id": "3b4c4332-bb86-4822-8596-f335607fa446",
+          "status": "active",
+          "updated_at": "2025-08-17T15:31:32.898119Z"
+        }
+      ]
+    },
+    "device_id": "3b4c4332-bb86-4822-8596-f335607fa446",
+    "metadata": {
+      "record_count": {
+        "classes": 1,
+        "observations": 0,
+        "students": 2,
+        "total": 3
+      }
+    },
+    "time_range": {
+      "days_back": 99999,
+      "from": "1751-11-07T11:29:24.533043500+00:00",
+      "to": "2025-08-21T11:29:24.533882800+00:00"
+    },
+    "version": "2.0"
+  },
+  "checksum": "6f6532b541b6863d0f1d812519042f8316b127d0292756b8bfc2c992dae83011",
+  "compression": "none",
+  "format": "json"
+}

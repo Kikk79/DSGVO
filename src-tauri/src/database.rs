@@ -223,6 +223,34 @@ impl Database {
                 .await?;
         }
 
+        // Check and add delete_after_import to sync_config table (if it exists)
+        let sync_config_exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sync_config'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        if sync_config_exists > 0 {
+            let sync_config_has_column = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM pragma_table_info('sync_config') WHERE name = 'delete_after_import'",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+
+            if sync_config_has_column == 0 {
+                println!("Adding delete_after_import column to sync_config table...");
+                sqlx::query("ALTER TABLE sync_config ADD COLUMN delete_after_import BOOLEAN DEFAULT 1")
+                    .execute(&self.pool)
+                    .await?;
+
+                sqlx::query("UPDATE sync_config SET delete_after_import = 1 WHERE delete_after_import IS NULL")
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1355,6 +1383,7 @@ impl Database {
                 webdav_password_encrypted BLOB NOT NULL,
                 auto_sync_enabled BOOLEAN DEFAULT 1,
                 sync_interval_seconds INTEGER DEFAULT 180,
+                delete_after_import BOOLEAN DEFAULT 1,
                 last_sync_timestamp DATETIME,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -1410,6 +1439,62 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+
+    /// Get WebDAV delete-after-import setting
+    pub async fn get_webdav_delete_after_import(&self) -> Result<bool> {
+        let sync_config_exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sync_config'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        if sync_config_exists == 0 {
+            return Ok(true);
+        }
+
+        #[derive(sqlx::FromRow)]
+        struct SyncSetting {
+            delete_after_import: Option<i64>,
+        }
+
+        let setting: Option<SyncSetting> =
+            sqlx::query_as("SELECT delete_after_import FROM sync_config WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+
+        Ok(setting
+            .and_then(|s| s.delete_after_import)
+            .map(|v| v != 0)
+            .unwrap_or(true))
+    }
+
+    /// Update WebDAV delete-after-import setting
+    pub async fn set_webdav_delete_after_import(&self, enabled: bool) -> Result<()> {
+        let sync_config_exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sync_config'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        if sync_config_exists == 0 {
+            return Err(anyhow::anyhow!("WebDAV not configured"));
+        }
+
+        let result = sqlx::query(
+            "UPDATE sync_config SET delete_after_import = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+        )
+        .bind(enabled)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!("WebDAV not configured"));
+        }
+
+        Ok(())
     }
 
     /// Update last sync timestamp

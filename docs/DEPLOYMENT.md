@@ -107,7 +107,7 @@ The application creates data directories in:
 1. Launch the application
 2. Accept privacy and data handling policies
 3. Configure initial settings (classes, user preferences)
-4. Set up P2P synchronization if needed between devices
+4. Configure WebDAV synchronization if needed between devices
 
 ## Uninstallation
 
@@ -174,13 +174,11 @@ ls ~/.local/share/schuelerbeobachtung/logs/
 ## Security Considerations
 
 ### Network Requirements
-- **Local Network**: P2P sync requires devices on same network
-- **Firewall**: Application uses dynamic ports for P2P communication
-- **Encryption**: All data encrypted with ChaCha20Poly1305
+- **WebDAV (optional)**: Configure a WebDAV endpoint if sync is required
+- **Firewall**: Allow outbound HTTPS to the WebDAV server (port 8443 in this deployment)
 
 ### Data Protection
-- Encryption keys stored in system keychain/keyring
-- Database files encrypted at rest
+- Database stored locally in plaintext
 - Audit logs immutable and timestamped
 
 ### GDPR Compliance

@@ -6,7 +6,7 @@
     "version": "1.0.0"
   },
   "architecture": {
-    "pattern": "Hybrid Local-First with Cloud Sync",
+    "pattern": "Hybrid Local-First with WebDAV Sync",
     "frontend": {
       "framework": "React 18.2.0",
       "language": "TypeScript 5.2.2",
@@ -63,10 +63,10 @@
     {
       "priority": "P0",
       "issue": "Security gaps",
-      "details": "No authentication, disabled encryption",
+      "details": "No authentication, plaintext storage",
       "impact": "Data security, GDPR compliance",
       "effort_hours": "40-80",
-      "recommendation": "Re-enable encryption, add auth layer"
+      "recommendation": "Document plaintext storage and add auth layer"
     },
     {
       "priority": "P1",
@@ -91,10 +91,9 @@
       "Extract command handlers from main.rs",
       "Implement custom error types",
       "Increase test coverage to 70%+",
-      "Re-enable database encryption"
+      "Document plaintext storage"
     ],
     "medium_priority": [
-      "Remove disabled P2P sync code",
       "Introduce repository pattern",
       "Lazy load calendar bundle (500KB)",
       "Standardize documentation language"
@@ -121,13 +120,13 @@
     },
     {
       "severity": "HIGH",
-      "issue": "Database encryption disabled",
-      "recommendation": "Re-enable SQLite encryption at rest"
+      "issue": "Database stored in plaintext",
+      "recommendation": "Document plaintext storage and enforce device access controls"
     },
     {
       "severity": "MEDIUM",
       "issue": "WebDAV credentials in SQLite",
-      "recommendation": "Use OS keyring for credential storage"
+      "recommendation": "Restrict credential access via OS policies"
     },
     {
       "severity": "MEDIUM",
@@ -206,9 +205,9 @@
   },
   "recommendations": {
     "immediate_p0": [
-      "Re-enable database encryption",
+      "Document plaintext storage and device access policies",
       "Add authentication layer (device PIN)",
-      "Fix WebDAV credential storage (use keyring)",
+      "Review WebDAV credential storage",
       "Split monolithic store into modules"
     ],
     "short_term_p1": [

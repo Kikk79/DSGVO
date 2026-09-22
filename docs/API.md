@@ -10,7 +10,6 @@ Diese API-Referenz dokumentiert alle verfügbaren Tauri-Commands der DSGVO-konfo
 - [Klassen-Management](#klassen-management)
 - [Beobachtungs-System](#beobachtungs-system)
 - [GDPR-Funktionen](#gdpr-funktionen)
-- [P2P-Synchronisation](#p2p-synchronisation)
 - [Geräte-Konfiguration](#geräte-konfiguration)
 - [System-Status](#system-status)
 
@@ -45,7 +44,7 @@ console.log(`${students.length} Schüler*innen gefunden`);
 
 **Fehlerbehandlung**: 
 - SQLite-Fehler bei Datenbankzugriff
-- Verschlüsselungsfehler bei korrupter Datenbank
+- Datenbankfehler bei beschädigten Dateien
 
 ### `create_student`
 
@@ -272,7 +271,7 @@ interface Observation {
 }
 ```
 
-**Verschlüsselung**: Text wird mit AES-256-GCM verschlüsselt gespeichert
+**Speicherung**: Text wird im Klartext in SQLite gespeichert
 
 **Beispiel**:
 ```typescript
@@ -402,102 +401,6 @@ const blob = new Blob([exportData], {
 const url = URL.createObjectURL(blob);
 ```
 
-## 🔄 P2P-Synchronisation
-
-### `start_p2p_sync`
-
-**Beschreibung**: Startet P2P-Discovery und Synchronisation
-
-```typescript
-start_p2p_sync(): Promise<void>
-```
-
-**Funktionalität**:
-- mDNS-Service-Advertisement (`_schuelerbeob._tcp.local`)
-- TLS-Server auf zufälligem Port starten
-- Listening für eingehende Pairing-Anfragen
-
-### `stop_p2p_sync`
-
-**Beschreibung**: Stoppt P2P-Synchronisation
-
-```typescript
-stop_p2p_sync(): Promise<void>
-```
-
-### `get_sync_status`
-
-**Beschreibung**: Aktueller Status der P2P-Synchronisation
-
-```typescript
-get_sync_status(): Promise<SyncStatus>
-```
-
-**Rückgabe**:
-```typescript
-interface SyncStatus {
-  peer_connected: boolean;
-  last_sync: string | null; // ISO 8601 DateTime
-  pending_changes: number;
-}
-```
-
-### `generate_pairing_pin`
-
-**Beschreibung**: Generiert einen temporären Pairing-PIN für Gerätekopplung
-
-```typescript
-generate_pairing_pin(): Promise<ActivePin>
-```
-
-**Rückgabe**:
-```typescript
-interface ActivePin {
-  pin: string; // 6-stelliger numerischer PIN
-  expires_at: string; // ISO 8601 DateTime
-  expires_in_seconds: number;
-}
-```
-
-**Sicherheit**:
-- PIN gültig für 5 Minuten
-- Kryptografisch sicherer Zufallsgenerator
-- Automatische Invalidierung nach Ablauf
-
-### `pair_device`
-
-**Beschreibung**: Koppelt mit anderem Gerät über Pairing-Code
-
-```typescript
-pair_device(params: {
-  pairingCode: string;
-}): Promise<void>
-```
-
-**Parameter**:
-- `pairingCode`: 6-stelliger PIN vom anderen Gerät
-
-**Pairing-Prozess**:
-1. mDNS-Discovery nach Service mit PIN
-2. TLS-Handshake mit Zertifikat-Austausch
-3. PIN-Validierung
-4. Persistent Pairing speichern
-
-### `trigger_sync`
-
-**Beschreibung**: Manuelle Synchronisation mit gekoppeltem Gerät
-
-```typescript
-trigger_sync(): Promise<void>
-```
-
-**Sync-Prozess**:
-1. Changeset seit letzter Sync generieren
-2. An Peer übertragen
-3. Changesets vom Peer empfangen
-4. Konflikte auflösen (Last-Writer-Wins)
-5. Sync-Status aktualisieren
-
 ## 🔧 Geräte-Konfiguration
 
 ### `get_device_config`
@@ -528,7 +431,7 @@ set_device_config(params: {
 ```
 
 **Parameter**:
-- `deviceType`: Gerätetyp für UI-Anpassungen und P2P-Discovery
+- `deviceType`: Gerätetyp für UI-Anpassungen
 - `deviceName`: Optional, benutzerfreundlicher Name
 
 ## 📊 System-Status
@@ -591,17 +494,11 @@ interface ApiError {
 - Unveränderliches Audit-Log mit Triggers
 - GDPR-konforme Metadaten (Aktion, Zeitstempel, Benutzer)
 
-### Verschlüsselung
+### Speicherung
 
 **Ruhende Daten**:
-- AES-256-GCM für Beobachtungstexte
-- OS-Keystore für Schlüsselverwaltung
-- Automatische Schlüssel-Rotation (geplant)
-
-**Transport**:
-- mTLS für P2P-Kommunikation
-- Selbstsignierte Zertifikate mit Pinning
-- ChaCha20-Poly1305 für Changeset-Verschlüsselung
+- Beobachtungstexte werden im Klartext gespeichert
+- Schutz über Gerätezugriff und organisatorische Maßnahmen
 
 ## 📈 Performance & Limits
 
@@ -612,16 +509,11 @@ interface ApiError {
 | Schüler*innen | 1.000 | 10.000 | Linear skalierend |
 | Klassen | 100 | 500 | Keine Performance-Auswirkung |
 | Beobachtungen | 50.000 | 500.000 | Indiziert, gut skalierend |
-| Beobachtungstext | 10 KB | 100 KB | Verschlüsselung-Overhead |
+| Beobachtungstext | 10 KB | 100 KB | Keine kryptografische Zusatzlast |
 
 ### Memory Usage
 
-**Verschlüsselung**:
-- ~100 Bytes Overhead pro verschlüsselter Beobachtung
-- Entschlüsselung on-demand bei Suchanfragen
-- LRU-Cache für häufig abgerufene Texte
-
-**P2P-Sync**:
+**Changeset-Export**:
 - Changeset-Größe proportional zu Änderungsvolumen
 - Streaming für große Changesets (>10MB)
 - Kompressionsverhältnis ~70% für typische Textdaten

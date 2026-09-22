@@ -51,6 +51,7 @@ export interface DeviceConfig {
 export interface WebDavConfig {
   url: string;
   username: string;
+  deleteAfterImport: boolean;
   configured: boolean;
   active: boolean;
   lastSync: string | null;
@@ -62,13 +63,8 @@ export interface WebDavSyncState {
   status: WebDavSyncStatus;
   lastSyncTime: string | null;
   error: string | null;
+  reachable: boolean | null;
   config: WebDavConfig | null;
-}
-
-export interface ActivePin {
-  pin: string;
-  expires_at: string;
-  expires_in_seconds: number;
 }
 
 export interface StudentWithStats {
@@ -163,7 +159,6 @@ interface AppState {
   error: string | null;
   syncStatus: SyncStatus | null;
   deviceConfig: DeviceConfig | null;
-  currentPin: ActivePin | null;
   databasePath: string | null;
   
   // Actions
@@ -222,12 +217,6 @@ interface AppState {
   // eslint-disable-next-line no-unused-vars
   setDeviceConfig: (device_type: 'computer' | 'notebook', device_name?: string) => Promise<void>;
   
-  // PIN Management
-  generatePairingPin: () => Promise<ActivePin>;
-  getCurrentPairingPin: () => Promise<void>;
-  clearPairingPin: () => Promise<void>;
-  getPairingCode: () => Promise<string>;
-  
   // Calendar Functions
   // eslint-disable-next-line no-unused-vars
   loadCalendarEvents: (startDate: Date, endDate: Date, classId?: number, category?: string) => Promise<void>;
@@ -252,6 +241,10 @@ interface AppState {
   triggerManualSync: () => Promise<void>;
   getWebDavSyncStatus: () => Promise<void>;
   disableWebDavSync: () => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  setWebDavDeleteAfterImport: (enabled: boolean) => Promise<void>;
+  // eslint-disable-next-line no-unused-vars
+  testWebDavConfigured: () => Promise<void>;
   // eslint-disable-next-line no-unused-vars
   setSyncStatus: (status: WebDavSyncStatus) => void;
   // eslint-disable-next-line no-unused-vars
@@ -282,7 +275,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   error: null,
   syncStatus: null,
   deviceConfig: null,
-  currentPin: null,
   databasePath: null,
 
   // Actions
@@ -721,62 +713,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  // PIN Management implementations
-  generatePairingPin: async (): Promise<ActivePin> => {
-    set({ loading: true, error: null });
-    
-    try {
-      const activePin = await invoke('generate_pairing_pin') as ActivePin;
-      set({ currentPin: activePin, loading: false, error: null });
-      return activePin;
-    } catch (err) {
-      set({ 
-        error: `Failed to generate pairing PIN: ${err}`,
-        loading: false 
-      });
-      throw err;
-    }
-  },
-
-  getCurrentPairingPin: async () => {
-    try {
-      const currentPin = await invoke('get_current_pairing_pin') as ActivePin | null;
-      set({ currentPin, error: null });
-    } catch (error) {
-      set({ error: `Failed to get current PIN: ${error}` });
-    }
-  },
-
-  clearPairingPin: async () => {
-    set({ loading: true, error: null });
-    
-    try {
-      await invoke('clear_pairing_pin');
-      set({ currentPin: null, loading: false, error: null });
-    } catch (err) {
-      set({ 
-        error: `Failed to clear pairing PIN: ${err}`,
-        loading: false 
-      });
-      throw err;
-    }
-  },
-
-  getPairingCode: async (): Promise<string> => {
-    set({ loading: true, error: null });
-    try {
-      const pairingCode = await invoke('get_pairing_code') as string;
-      set({ loading: false, error: null });
-      return pairingCode;
-    } catch (err) {
-      set({ 
-        error: `Failed to get pairing code: ${err}`,
-        loading: false 
-      });
-      throw err;
-    }
-  },
-
   // Database Path Management implementations
   getDatabasePath: async () => {
     try {
@@ -899,6 +835,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     status: 'idle',
     lastSyncTime: null,
     error: null,
+    reachable: null,
     config: null,
   },
   
@@ -1009,6 +946,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         last_sync: string | null;
         url: string | null;
         username: string | null;
+        delete_after_import: boolean | null;
       };
       
       set({ 
@@ -1016,9 +954,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           status: status.active ? 'idle' : 'idle',
           lastSyncTime: status.last_sync,
           error: null,
+          reachable: get().webdavSync.reachable,
           config: status.configured && status.url && status.username ? {
             url: status.url,
             username: status.username,
+            deleteAfterImport: status.delete_after_import ?? true,
             configured: status.configured,
             active: status.active,
             lastSync: status.last_sync,
@@ -1045,12 +985,51 @@ export const useAppStore = create<AppState>((set, get) => ({
           status: 'idle',
           lastSyncTime: null,
           error: null,
+          reachable: null,
           config: null,
         }
       });
     } catch (error) {
       console.error('❌ Failed to disable WebDAV sync:', error);
       throw error;
+    }
+  },
+
+  setWebDavDeleteAfterImport: async (enabled: boolean) => {
+    try {
+      await invoke('set_webdav_delete_after_import', { enabled });
+      const current = get().webdavSync;
+      set({
+        webdavSync: {
+          ...current,
+          config: current.config
+            ? { ...current.config, deleteAfterImport: enabled }
+            : null,
+        },
+      });
+    } catch (error) {
+      console.error('❌ Failed to update WebDAV delete-after-import:', error);
+      throw error;
+    }
+  },
+
+  testWebDavConfigured: async () => {
+    try {
+      const reachable = await invoke('test_webdav_connection_configured') as boolean;
+      set({
+        webdavSync: {
+          ...get().webdavSync,
+          reachable,
+        },
+      });
+    } catch (error) {
+      console.error('❌ Failed to test configured WebDAV connection:', error);
+      set({
+        webdavSync: {
+          ...get().webdavSync,
+          reachable: false,
+        },
+      });
     }
   },
   

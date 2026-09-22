@@ -13,7 +13,6 @@ export const createMockStore = (initialState = {}) => {
     error: null,
     syncStatus: null,
     deviceConfig: null,
-    // currentPin: removed - P2P no longer supported
     databasePath: null,
     ...initialState,
   };
@@ -40,11 +39,6 @@ export const createMockStore = (initialState = {}) => {
     importChangesetFromFile: vi.fn(),
     getDeviceConfig: vi.fn(),
     setDeviceConfig: vi.fn(),
-    // P2P PIN functions removed - no longer supported
-    // generatePairingPin: vi.fn(),
-    // getCurrentPairingPin: vi.fn(),
-    // clearPairingPin: vi.fn(),
-    // getPairingCode: vi.fn(), // P2P function removed
     getDatabasePath: vi.fn(),
     setDatabasePath: vi.fn(),
   };

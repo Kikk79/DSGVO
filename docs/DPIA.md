@@ -22,9 +22,9 @@
 - **Geografischer Umfang**: Ausschließlich lokal (Schulgebäude, Lehrerheimarbeitsplätze)
 
 ### 1.3 Technische Verfahren
-- **Speicherung**: Lokal verschlüsselte SQLite-Datenbanken auf 2 Geräten pro Lehrkraft
-- **Übertragung**: Point-to-Point Verschlüsselung (mTLS) zwischen Notebook und Desktop
-- **Zugriff**: Lokale Anmeldung, optional 2-Faktor-Authentifizierung
+- **Speicherung**: Lokale SQLite-Datenbank (plaintext) auf den Geräten der Lehrkraft
+- **Übertragung**: Optional über WebDAV (HTTPS), in dieser Umgebung via Port 8443
+- **Zugriff**: Lokaler Gerätezugriff (OS-Login), keine integrierte 2FA
 
 ## 2. Bewertung der Notwendigkeit und Verhältnismäßigkeit
 
@@ -109,39 +109,18 @@ Legende: ✓ Akzeptabel | ⚠️ Überwachung | 🔴 Maßnahmen erforderlich
 
 ### 4.1 Technische Maßnahmen
 
-#### Verschlüsselung und Authentifizierung
-- **Datenbank-Verschlüsselung**: AES-256-GCM für ruhende Daten
-- **Transportverschlüsselung**: TLS 1.3 mit gegenseitiger Authentifizierung
-- **Schlüsselverwaltung**: OS-integrierte Keystore-Systeme
-- **Zugriffskontrolle**: Gerätepaarung mit kryptographischen Zertifikaten
-
-```rust
-// Beispiel: Verschlüsselungsimplementierung
-pub struct CryptoManager {
-    cipher: ChaCha20Poly1305,
-    device_cert: Certificate,
-}
-
-impl CryptoManager {
-    pub fn encrypt_observation(&self, data: &ObservationData) -> Result<Vec<u8>> {
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let ciphertext = self.cipher.encrypt(&nonce, data.as_bytes())?;
-        Ok([nonce.as_ref(), &ciphertext].concat())
-    }
-}
-```
+#### Speicher- und Zugriffsschutz
+- **Datenbank**: Lokal gespeichert (plaintext)
+- **Zugriff**: Schutz über Geräte-Login und physische Zugriffskontrollen
 
 #### Datenintegrität und Audit
-- **Unveränderliches Audit-Log**: Alle Operationen kryptographisch signiert
-- **Checksummen-Validierung**: SHA-256 für Datenintegrität
-- **Replay-Schutz**: Nonce-basierte Anfrageverifizierung
-- **Backup-Verschlüsselung**: Automatische verschlüsselte Backups
+- **Unveränderliches Audit-Log**: Append-only Audit-Tabelle für alle Operationen
+- **Checksummen-Validierung**: Prüfsummen zur Integritätsprüfung
 
 #### Netzwerk-Sicherheit
-- **Isolation**: Keine Internet-Verbindung erforderlich
-- **mDNS-Filterung**: Nur autorisierte Geräte im lokalen Netz
-- **Firewall-Regeln**: Restriktive Port-Konfiguration
-- **VPN-Support**: Sichere Verbindung für Remote-Szenarien
+- **Isolation**: Keine Internet-Verbindung erforderlich für lokalen Betrieb
+- **WebDAV (optional)**: Synchronisation über HTTPS (Port 8443 in dieser Umgebung)
+- **Firewall-Regeln**: Nur ausgehende HTTPS-Verbindungen zum WebDAV-Server erlauben
 
 ### 4.2 Organisatorische Maßnahmen
 
@@ -191,9 +170,9 @@ Nach Implementierung aller geplanten Maßnahmen verbleiben folgende Restrisiken:
 
 | Risiko-ID | Restrisiko nach Maßnahmen | Akzeptabilität | Begründung |
 |-----------|--------------------------|----------------|-------------|
-| R001 | Niedrig | ✅ Akzeptabel | Verschlüsselung + Zugriffskontrolle ausreichend |
+| R001 | Niedrig | ✅ Akzeptabel | Zugriffskontrolle und organisatorische Maßnahmen |
 | R002 | Sehr niedrig | ✅ Akzeptabel | Backup-Strategien und Redundanz implementiert |
-| R003 | Niedrig | ✅ Akzeptabel | Remote-Wipe und Verschlüsselung |
+| R003 | Niedrig | ✅ Akzeptabel | Backup-Strategie und organisatorische Maßnahmen |
 | R004 | Niedrig | ✅ Akzeptabel | Schulung + technische Qualitätssicherung |
 | R005 | Sehr niedrig | ✅ Akzeptabel | Audit-Logging aller Exporte |
 | R006 | Sehr niedrig | ✅ Akzeptabel | Kryptographische Integrität |
@@ -205,7 +184,7 @@ Nach Implementierung aller geplanten Maßnahmen verbleiben folgende Restrisiken:
 **Begründung**:
 1. **Rechtmäßigkeit**: Klare Rechtsgrundlage im öffentlichen Interesse
 2. **Verhältnismäßigkeit**: Angemessenes Verhältnis zwischen Nutzen und Eingriffen
-3. **Sicherheit**: State-of-the-Art Verschlüsselung und Sicherheitsmaßnahmen
+3. **Sicherheit**: Angemessene Schutzmaßnahmen für lokalen Betrieb
 4. **Transparenz**: Vollständige Information der Betroffenen
 5. **Kontrollierbarkeit**: Umfassende Audit-Mechanismen
 6. **Betroffenenrechte**: Vollständige technische Umsetzung aller DSGVO-Rechte
@@ -213,7 +192,7 @@ Nach Implementierung aller geplanten Maßnahmen verbleiben folgende Restrisiken:
 ### 5.3 Empfehlungen
 
 #### Sofortige Maßnahmen (vor Inbetriebnahme)
-- [x] Vollständige Verschlüsselung implementieren
+- [ ] Geräteschutz- und Passwortrichtlinien festlegen
 - [x] Audit-Logging aktivieren und testen
 - [ ] Datenschutz-Schulung für alle Nutzer*innen durchführen
 - [ ] Informationsmaterialien für Eltern und Schüler*innen erstellen
@@ -251,7 +230,7 @@ Nach Implementierung aller geplanten Maßnahmen verbleiben folgende Restrisiken:
 ## Anhänge
 
 ### Anhang A: Technische Dokumentation
-- Verschlüsselungsstandards und Implementierung
+- Speicher- und Zugriffskonzept
 - Netzwerk-Architektur und Sicherheitskonzept
 - Backup- und Recovery-Verfahren
 

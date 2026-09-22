@@ -3,7 +3,9 @@
     "allow": [
       "mcp__ruv-swarm",
       "mcp__claude-flow@alpha",
-      "mcp__flow-nexus"
+      "mcp__flow-nexus",
+      "mcp__serena__find_file",
+      "Skill(hive-mind:hive-mind-init)"
     ],
     "deny": []
   }

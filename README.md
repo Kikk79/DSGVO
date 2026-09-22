@@ -30,7 +30,7 @@ A secure desktop application for educational student observation with built-in G
 - **Flexible Data Ranges**: Export last 7 days, 30 days, 90 days, 1 year, or **ALL DATA** (unlimited)
 - **Smart File Detection**: Automatic file type recognition and handling
 - **Offline-First**: Works completely without internet connection
-- **Device Independence**: No complex setup or pairing required
+- **Device Independence**: No complex setup required
 - **Data Integrity**: Maintains data consistency across transfers
 
 ## 🚀 Quick Installation
@@ -174,18 +174,12 @@ npm run tauri:dev
 - **GDPR**: All data operations must include audit logging
 
 ### Contributing
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for:
-- Code style guidelines
-- Pull request process
-- Issue reporting procedures  
-- Development environment setup
-- Testing requirements
+We welcome contributions and feedback via GitHub Issues.
 
 ## 📖 Documentation
 
 ### User Guides
 - **[Installation Guide](docs/INSTALLATION.md)**: Complete setup instructions
-- **[User Manual](docs/USER_GUIDE.md)**: Step-by-step usage instructions
 - **[GDPR Guide](docs/DPIA.md)**: Data protection compliance information
 - **[Quick Start](docs/QUICK_INSTALL.md)**: Get up and running in minutes
 
@@ -193,16 +187,14 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 - **[Deployment Guide](docs/DEPLOYMENT.md)**: Installation for multiple users
 - **[API Reference](docs/API.md)**: Complete technical documentation
 - **[Delete Features](docs/DELETE_FEATURES.md)**: GDPR deletion implementation
-- **[Security Guidelines](SECURITY.md)**: Best practices for data protection
 
 ### Legal Compliance
 - **[Data Protection Impact Assessment](docs/DPIA.md)**: Complete GDPR compliance analysis
-- **[Privacy Policy Templates](docs/privacy/)**: Ready-to-use privacy documentation
 - **[Audit Procedures](docs/audit/)**: Compliance verification processes
 
 ## ⚠️ Important Security Notice
 
-**Current Version Status**: This version features the new **Unified Synchronization System** and has encryption temporarily disabled due to system compatibility issues. This means:
+**Current Version Status**: This version features the new **Unified Synchronization System** and stores data in plaintext. This means:
 
 - **🔄 New: Unified Sync Interface** - All export/import operations consolidated into single `/sync` tab
 - **🔄 New: Flexible Export Options** - Choose between Changeset and Full Export modes  
@@ -212,14 +204,13 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 - **✅ Local storage only** - no network transmission of data
 - **Recommended for testing and evaluation** rather than production use
 
-For production environments, please ensure appropriate physical security of devices and consider the encryption status in your data protection assessment.
+For production environments, please ensure appropriate physical security of devices and consider the plaintext storage in your data protection assessment.
 
 ## 🤝 Support & Community
 
 ### Getting Help
 - **Documentation**: Comprehensive guides for all features
 - **GitHub Issues**: Report bugs and request features
-- **Community Forum**: Connect with other users and developers
 - **Professional Support**: Available for educational institutions
 
 ### Feedback & Contributions
@@ -285,7 +276,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **🔒 Need GDPR compliance help?** Check out our [Data Protection Guide](docs/DPIA.md) for complete compliance documentation and templates.
 
-**💡 Questions or feedback?** Visit our [GitHub Issues](https://github.com/your-repo/issues) or [Community Forum](https://community.example.com) for support and discussion.
+**💡 Questions or feedback?** Visit our [GitHub Issues](https://github.com/your-repo/issues) for support and discussion.
 
 ---
 

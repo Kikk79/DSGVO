@@ -9,13 +9,16 @@ export function WebDavSettings() {
     testWebDavConnection,
     triggerManualSync,
     getWebDavSyncStatus,
+    testWebDavConfigured,
     disableWebDavSync,
+    setWebDavDeleteAfterImport,
   } = useAppStore();
 
   // Form state
   const [url, setUrl] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [deleteAfterImport, setDeleteAfterImport] = useState(true);
   
   // UI state
   const [testing, setTesting] = useState(false);
@@ -26,13 +29,28 @@ export function WebDavSettings() {
   // Load existing configuration
   useEffect(() => {
     getWebDavSyncStatus();
-  }, [getWebDavSyncStatus]);
+    testWebDavConfigured();
+  }, [getWebDavSyncStatus, testWebDavConfigured]);
+
+  // Auto-retry reachability every 30s if not reachable
+  useEffect(() => {
+    if (!webdavSync.config?.configured || webdavSync.reachable !== false) {
+      return;
+    }
+
+    const intervalId = setInterval(() => {
+      testWebDavConfigured();
+    }, 30000);
+
+    return () => clearInterval(intervalId);
+  }, [webdavSync.config?.configured, webdavSync.reachable, testWebDavConfigured]);
 
   // Update form when config is loaded
   useEffect(() => {
     if (webdavSync.config) {
       setUrl(webdavSync.config.url);
       setUsername(webdavSync.config.username);
+      setDeleteAfterImport(webdavSync.config.deleteAfterImport);
     }
   }, [webdavSync.config]);
 
@@ -72,6 +90,8 @@ export function WebDavSettings() {
 
     try {
       await configureWebDav(url, username, password);
+      await setWebDavDeleteAfterImport(deleteAfterImport);
+      await testWebDavConfigured();
       alert('WebDAV-Konfiguration erfolgreich gespeichert!');
       setPassword(''); // Clear password after successful save
     } catch (error) {
@@ -82,6 +102,7 @@ export function WebDavSettings() {
   const handleManualSync = async () => {
     try {
       await triggerManualSync();
+      await testWebDavConfigured();
       alert('Synchronisation erfolgreich abgeschlossen!');
     } catch (error) {
       alert(`Synchronisation fehlgeschlagen: ${error}`);
@@ -95,10 +116,23 @@ export function WebDavSettings() {
         setUrl('');
         setUsername('');
         setPassword('');
+        setDeleteAfterImport(true);
         alert('WebDAV-Synchronisation deaktiviert');
       } catch (error) {
         alert(`Fehler beim Deaktivieren: ${error}`);
       }
+    }
+  };
+
+  const handleDeleteAfterImportToggle = async (enabled: boolean) => {
+    setDeleteAfterImport(enabled);
+    if (!webdavSync.config?.configured) {
+      return;
+    }
+    try {
+      await setWebDavDeleteAfterImport(enabled);
+    } catch (error) {
+      alert(`Fehler beim Aktualisieren: ${error}`);
     }
   };
 
@@ -173,6 +207,19 @@ export function WebDavSettings() {
             {getSyncStatusIcon()}
             <div>
               <p className="font-medium text-gray-900">{getSyncStatusText()}</p>
+              {webdavSync.config?.configured && (
+                <p className="text-sm text-gray-500">
+                  Server: {webdavSync.reachable === null ? 'Unbekannt' : (webdavSync.reachable ? 'Erreichbar' : 'Nicht erreichbar')}
+                  {' · '}
+                  Nach Import löschen: {webdavSync.config.deleteAfterImport ? 'Ja' : 'Nein'}
+                  {webdavSync.reachable === false && (
+                    <>
+                      {' · '}
+                      Automatische Prüfung aktiv
+                    </>
+                  )}
+                </p>
+              )}
               <p className="text-sm text-gray-500">
                 Letzte Sync: {formatLastSync(webdavSync.lastSyncTime)}
               </p>
@@ -211,6 +258,12 @@ export function WebDavSettings() {
               <div>
                 <span className="text-gray-500">Benutzername:</span>
                 <p className="font-medium text-gray-900">{webdavSync.config.username}</p>
+              </div>
+              <div>
+                <span className="text-gray-500">Nach Import löschen:</span>
+                <p className="font-medium text-gray-900">
+                  {webdavSync.config.deleteAfterImport ? 'Ja' : 'Nein'}
+                </p>
               </div>
             </div>
           </div>
@@ -282,6 +335,20 @@ export function WebDavSettings() {
             <p className="mt-1 text-xs text-gray-500">
               Tipp: Verwenden Sie ein App-spezifisches Passwort für mehr Sicherheit
             </p>
+          </div>
+
+          {/* Delete After Import */}
+          <div className="flex items-start gap-3">
+            <input
+              id="webdav-delete-after-import"
+              type="checkbox"
+              checked={deleteAfterImport}
+              onChange={(e) => handleDeleteAfterImportToggle(e.target.checked)}
+              className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+            <label htmlFor="webdav-delete-after-import" className="text-sm text-gray-700">
+              Importierte Änderungen auf dem WebDAV-Server löschen
+            </label>
           </div>
 
           {/* Test Result */}

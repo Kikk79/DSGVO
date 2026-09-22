@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document outlines the comprehensive testing strategy for the DSGVO-compliant student observation system, ensuring 80%+ test coverage on critical paths with focus on security, data privacy, and P2P synchronization.
+This document outlines the comprehensive testing strategy for the DSGVO-compliant student observation system, ensuring 80%+ test coverage on critical paths with focus on security, data privacy, and WebDAV changeset synchronization.
 
 ## Test Architecture
 
@@ -12,7 +12,7 @@ This document outlines the comprehensive testing strategy for the DSGVO-complian
          /\
         /E2E\      <- 15% (End-to-end with Playwright)
        /------\
-      /Integration\ <- 25% (API, DB, P2P sync)
+      /Integration\ <- 25% (API, DB, WebDAV sync)
      /------------\
     /   Unit      \ <- 60% (Components, stores, utilities)
    /--------------\
@@ -24,7 +24,7 @@ This document outlines the comprehensive testing strategy for the DSGVO-complian
 - User authentication and authorization
 - Student data CRUD operations
 - Observation creation and management
-- P2P synchronization workflows
+- WebDAV synchronization workflows
 - WebDAV backup/restore
 - DSGVO data export/deletion
 
@@ -63,7 +63,7 @@ This document outlines the comprehensive testing strategy for the DSGVO-complian
 
 **Current Status:**
 - ✅ Basic integration tests exist (`/src/__tests__/integration.test.tsx`)
-- ✅ P2P sync integration tests exist (`/tests/integration.test.ts`)
+- ✅ WebDAV changeset sync integration tests exist (`src-tauri/src/tests/integration`)
 
 **Missing Coverage:**
 - ❌ WebDAV integration tests
@@ -103,11 +103,11 @@ npm run test:coverage # Generate coverage report
 
 ## Critical Test Scenarios
 
-### 1. P2P Synchronization Tests
+### 1. WebDAV Synchronization Tests
 **Priority: CRITICAL**
 
 Test Cases:
-- ✅ Successful device pairing with PIN
+- ✅ Successful sync configuration and status checks
 - ✅ Changeset synchronization between devices
 - ✅ Conflict resolution (last-writer-wins)
 - ✅ Interrupted sync recovery
@@ -133,7 +133,7 @@ Test Cases:
 Test Cases:
 - ✅ Encrypted data storage verification
 - ✅ Decryption failure without correct keys
-- ✅ mTLS connection authentication
+- ✅ HTTPS connection authentication (WebDAV)
 - ✅ Audit log immutability
 - ❌ SQL injection prevention
 - ❌ XSS attack prevention
@@ -166,7 +166,7 @@ Test Cases:
 ### High Priority Gaps (Must Fix)
 1. **CategoryManager component** - No test coverage for critical feature
 2. **WebDavSettings component** - Backup/restore workflows untested
-3. **Network failure scenarios** - P2P sync needs resilience testing
+3. **Network failure scenarios** - WebDAV sync needs resilience testing
 4. **DSGVO workflows** - Incomplete right-to-be-forgotten testing
 5. **Security attack vectors** - Missing XSS, CSRF, SQL injection tests
 

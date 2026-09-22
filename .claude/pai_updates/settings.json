@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "_envDocs": {
+    "description": "Platform-agnostic environment variables used throughout the Personal AI system",
+    "DA": "Digital Assistant name - your AI's identity (e.g., 'Kai', 'PAI', 'Nova'). Used in statusline, hooks, and agent identification.",
+    "PAI_DIR": "Root directory for all PAI configuration. The setup.sh script updates this automatically. If hooks fail with 'No such file or directory', update this to your actual path (e.g., /Users/john/.claude).",
+    "PAI_SIMPLE_COLORS": "Set to '1' to use basic ANSI colors in statusline instead of 24-bit RGB. Enable if you see garbled colors or display issues in your terminal. Default: 0 (use full color).",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "Maximum tokens for Claude responses. Higher values allow longer outputs but cost more."
+  },
+  "_setupNote": "IMPORTANT: Run 'bash .claude/setup.sh' to automatically configure PAI_DIR. If you see hook errors mentioning '__HOME__', the setup script was not run or you need to manually change PAI_DIR below to your actual home directory path (e.g., /Users/john/.claude on macOS or /home/john/.claude on Linux).",
+  "env": {
+    "PAI_DIR": "__HOME__/.claude",
+    "DA": "PAI",
+    "PAI_SIMPLE_COLORS": "0",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
+  },
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "MultiEdit",
+      "Glob",
+      "Grep",
+      "WebFetch(domain:*)",
+      "WebSearch",
+      "NotebookRead",
+      "NotebookEdit",
+      "TodoWrite",
+      "ExitPlanMode",
+      "Task",
+      "mcp__*"
+    ],
+    "deny": [
+      "Bash(diskutil partitionDisk)",
+      "Bash(diskutil eraseDisk)",
+      "Bash(diskutil eraseVolume)",
+      "Bash(diskutil reformat)",
+      "Bash(diskutil zeroDisk)",
+      "Bash(diskutil appleRAID)",
+      "Bash(diskutil randomDisk)",
+      "Bash(diskutil coreStorage)",
+      "Bash(diskutil cs)",
+      "Bash(diskutil disableJournal)",
+      "Bash(diskutil resetFusion)",
+      "Bash(diskutil disableOwnership)",
+      "Bash(diskutil apfs deleteContainer)",
+      "Bash(diskutil apfs eraseVolume)",
+      "Bash(diskutil apfs decryptVolume)",
+      "Bash(diskutil apfs changePassphrase)",
+      "Bash(diskutil apfs deleteVolume)",
+      "Bash(diskutil apfs deleteVolumeGroup)",
+      "Bash(diskutil apfs deleteSnapshot)",
+      "Bash(rm -rf /)",
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf $HOME)",
+      "Bash(rm -rf $PAI_HOME)",
+      "Bash(rm -rf $PAI_DIR)",
+      "Bash(sudo rm -rf /)",
+      "Bash(sudo rm -rf /*)",
+      "Bash(fork bomb)",
+      "Bash(dd if=/dev/zero of=/dev/sda)",
+      "Bash(mkfs.ext4 /dev/sda)",
+      "Bash( /dev/sda)",
+      "Bash(> /dev/sda)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/security-validator.ts"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/capture-all-events.ts --event-type PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/capture-all-events.ts --event-type PostToolUse"
+          },
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/update-tab-on-action.ts"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/capture-session-summary.ts"
+          },
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/capture-all-events.ts --event-type SessionEnd"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/update-tab-titles.ts"
+          },
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/capture-all-events.ts --event-type UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/load-core-context.ts"
+          },
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/initialize-session.ts"
+          },
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/capture-all-events.ts --event-type SessionStart"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/stop-hook.ts"
+          },
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/capture-all-events.ts --event-type Stop"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/subagent-stop-hook.ts"
+          },
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/capture-all-events.ts --event-type SubagentStop"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/context-compression-hook.ts"
+          },
+          {
+            "type": "command",
+            "command": "${PAI_DIR}/Hooks/capture-all-events.ts --event-type PreCompact"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash ${PAI_DIR}/statusline-command.sh"
+  },
+  "enabledPlugins": {
+    "browser-automation@browser-tools": true
+  },
+  "alwaysThinkingEnabled": true,
+  "max_tokens": 4096
+}

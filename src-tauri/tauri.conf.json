@@ -40,7 +40,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "longDescription": "GDPR-compliant student observation system with P2P synchronization",
+    "longDescription": "GDPR-compliant student observation system with WebDAV changeset synchronization",
     "macOS": {
       "entitlements": null,
       "exceptionDomain": "",

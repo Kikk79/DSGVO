@@ -42,7 +42,7 @@ This comprehensive analysis evaluates the DSGVO (GDPR-compliant student observat
 - ✅ SQLx 0.7 - Type-safe database operations
 - ✅ Tokio 1.0 - Async runtime
 - ✅ Chrono 0.4 - Date/time handling
-- ⚠️ **No encryption** (plaintext storage - documented)
+- ⚠️ **Plaintext storage** (documented)
 
 **Mobile (Capacitor)**:
 
@@ -783,7 +783,7 @@ updates:
 | ----------------------- | ----------- | ---------- | ------------------------ | ------------------------------------ |
 | Quality gates failing   | 🔴 Critical | High       | PRs blocked, dev slowed  | Fix immediately (Week 1)             |
 | Low test coverage       | 🔴 Critical | High       | Bugs in production       | Increase coverage (Month 1)          |
-| No encryption           | 🟡 High     | Medium     | Data breach risk         | Document clearly, plan re-enablement |
+| Plaintext storage       | 🟡 High     | Medium     | Data breach risk         | Document clearly, enforce device controls |
 | Incomplete workflows    | 🟡 High     | High       | Manual release errors    | Implement automation (Month 1)       |
 | No security scanning    | 🟡 High     | Medium     | Vulnerable dependencies  | Add CI scanning (Month 1)            |
 | Performance bottlenecks | 🟢 Medium   | Low        | Slow with large datasets | Optimize pagination (Quarter 1)      |
@@ -815,7 +815,7 @@ updates:
 - ❌ **Quality gates failing** - 34 ESLint errors blocking CI
 - ❌ **Low test coverage** - ~25% vs 75% target
 - ❌ **Incomplete workflows** - Release pipeline skeleton only
-- ⚠️ **No encryption** - Security trade-off (documented)
+- ⚠️ **Plaintext storage** - Security trade-off (documented)
 
 ### 11.2 Success Metrics
 
@@ -857,7 +857,6 @@ updates:
 - `docs/API.md` - Tauri command reference
 - `docs/DPIA.md` - Data Protection Impact Assessment
 - `docs/DELETE_FEATURES.md` - GDPR deletion implementation
-- `ENCRYPTION_DISABLED.md` - Security status
 
 ### 12.2 Workflow Files
 
