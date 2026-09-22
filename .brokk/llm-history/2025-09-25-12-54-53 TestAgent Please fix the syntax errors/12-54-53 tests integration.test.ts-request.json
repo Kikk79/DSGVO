@@ -1,0 +1,31 @@
+{
+  "messages" : [ {
+    "text" : "You are an assistant that identifies potentially relevant test files.\nGiven a coding task, the current workspace, and a list of test files, identify which files *may* contain tests relevant to implementing the instructions.\nList the full paths of the potentially relevant files, one per line. If none seem relevant, respond with \"None\".\n\nGive the most-relevant files first.\n"
+  }, {
+    "name" : null,
+    "contents" : [ {
+      "text" : "<testfiles>\ntests\\integration.test.ts\n</testfiles>\n\n<workspace>\n\n- Editable files: package.json, src\\stores\\appStore.ts\n- Read-only snippets: \"Summary of src-tauri.src.crypto.secret_set, src.stores.Student, src-tauri.src.main.delete_student, src.components.DataPortability, src.components.PrivacyPolicy, src-tauri.src.gdpr.DataRetentionPolicy, src-tauri.src.p2p.P2PManager, src-tauri.build.main, src-tauri.src.crypto.secret_get, src-tauri.src.main.pair_device, src-tauri.src.main.main, src-tauri.src.p2p.PeerInfo, src-tauri.src.audit.AuditLogger, src.stores.SyncStatus, tests.performSync, src-tauri.src.main.create_class, src.components.DataCorrection, src-tauri.src.main.DeviceConfig, src-tauri.src.main.get_device_config, src-tauri.src.main.Observation, src-tauri.src.crypto.data_dir, src.components.ObservationForm, src-tauri.src.gdpr.GdprManager, src-tauri.src.main.get_current_pairing_pin, src.components.SettingsPage, src.stores.Observation, src.components.SyncManager, tests.pairDevices, src.stores.invoke, src-tauri.src.crypto.save_secrets, src-tauri.src.main.delete_class, src.stores._module_.useAppStore, src-tauri.src.audit.AuditEntry, src-tauri.src.main.export_changeset, src.components.Layout, src.stores.DeviceConfig, src.components.StudentSearch, src-tauri.src.crypto.secrets_file, tests.createTestDevice, src-tauri.src.main.import_changeset, src-tauri.src.main.generate_pairing_pin, src-tauri.src.main.create_student, src.stores.AppState, tests.performPartialSync, src-tauri.src.main.create_observation, src-tauri.src.main.search_observations, src-tauri.src.database.Database, src-tauri.src.main.start_p2p_sync, src.components._module_.CATEGORIES, src-tauri.src.main.Student, src-tauri.src.main.get_classes, src.stores.Class, src-tauri.src.main.get_students, src-tauri.src.main.stop_p2p_sync, src.components._module_.QUICK_TAGS, src-tauri.src.main.clear_pairing_pin, src.stores.set, src-tauri.src.main.trigger_sync, src-tauri.src.main.get_sync_status, src-tauri.src.gdpr.StudentExport, src-tauri.src.p2p.PinData, src-tauri.src.main.change_database_path, src-tauri.src.main.regenerate_encryption_key, src.components.ObservationFormData, src-tauri.src.main.AppState, src.components.Dashboard, tests.SyncResult, src.App, src.components.LayoutProps, src.stores.ActivePin, src-tauri.src.p2p.ActivePin, src-tauri.src.crypto.load_secrets, src-tauri.src.main.SyncStatus, src-tauri.src.crypto.CryptoManager, src-tauri.src.main.export_student_data, src-tauri.src.main.set_device_config, src.components.AddStudent, src-tauri.src.main.Class, tests.TestDevice\"\n</workspace>\n\n<task>\nPlease fix the syntax errors in `src/stores/appStore.ts`. Specifically, remove the duplicate and misplaced `throw err;` statements within the `setDeviceConfig` function and the stray `throw err;` after it.\n</task>\n\nWhich of these test files might be relevant to testing the changes made to satisfy the given task? List the full paths, one per line.\n"
+    } ]
+  } ],
+  "parameters" : {
+    "modelName" : null,
+    "temperature" : null,
+    "topP" : null,
+    "frequencyPenalty" : null,
+    "presencePenalty" : null,
+    "maxOutputTokens" : null,
+    "stopSequences" : [ ],
+    "toolSpecifications" : [ ],
+    "toolChoice" : null,
+    "responseFormat" : null,
+    "maxCompletionTokens" : null,
+    "logitBias" : { },
+    "parallelToolCalls" : null,
+    "seed" : null,
+    "user" : null,
+    "store" : null,
+    "metadata" : { },
+    "serviceTier" : null,
+    "reasoningEffort" : null
+  }
+}

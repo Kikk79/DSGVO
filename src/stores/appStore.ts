@@ -408,28 +408,22 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setDeviceConfig: async (device_type: 'computer' | 'notebook', device_name?: string) => {
     set({ loading: true, error: null });
-    
+
     try {
       await invoke('set_device_config', {
         deviceType: device_type,
         deviceName: device_name || null,
       });
-      
+
       // Refresh device config after setting
       await get().getDeviceConfig();
       set({ loading: false, error: null });
     } catch (err) {
-      set({ 
+      set({
         error: `Failed to set device config: ${err}`,
-        loading: false 
+        loading: false,
       });
       throw err;
-    }
-  throw err;
-    }
-  },
-
-        throw err;
     }
   },
 
