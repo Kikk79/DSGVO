@@ -267,12 +267,17 @@ fn decide(local: Option<&Meta>, inc: &Stamp, inc_deleted: bool, parent_deleted: 
             }
         }
         Some(_) if inc_deleted => Action::Write(ChangeKind::Tombstone),
-        Some(_) if parent_deleted => Action::Cascade(ChangeKind::Tombstone),
         Some(l) => {
-            if newer(inc, &l.stamp()) == Ordering::Greater {
-                Action::Write(ChangeKind::Update)
-            } else {
+            // Erst den Gewinner bestimmen; Kaskade nur, wenn die GEWINNENDE (eingehende) Fassung
+            // auf ein gelöschtes Elternteil zeigt. Gewinnt die lokale Fassung, bleibt sie
+            // (z. B. Schüler lokal in eine andere Klasse verschoben); lokale Kinder gelöschter
+            // Eltern erfasst `cascade_local_children`.
+            if newer(inc, &l.stamp()) != Ordering::Greater {
                 Action::Skip
+            } else if parent_deleted {
+                Action::Cascade(ChangeKind::Tombstone)
+            } else {
+                Action::Write(ChangeKind::Update)
             }
         }
     }
@@ -1225,6 +1230,63 @@ mod tests {
                 assert_eq!(leaked, 0);
             }
             converge(&a, &b).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_merge_moved_student_survives_deletion_of_old_class() {
+        // B verschiebt Schüler S von Klasse C nach D und löscht danach C. A hat noch die alte
+        // Fassung von S in C. S und seine Beobachtungen müssen auf beiden Geräten leben.
+        for b_first in [true, false] {
+            let (a, b, _d) = devices().await;
+            let (_c, s, o) = seed(&a).await;
+            a.create_class("5b".into(), "2026/27".into()).await.unwrap();
+            converge(&a, &b).await;
+
+            let (c_id, d_id): (i64, i64) = sqlx::query_as(
+                "SELECT (SELECT id FROM classes WHERE name = '5a'), (SELECT id FROM classes WHERE name = '5b')",
+            )
+            .fetch_one(b.pool())
+            .await
+            .unwrap();
+            let d_id_s = d_id.to_string();
+            exec(
+                &b,
+                "UPDATE students SET class_id = CAST(? AS INTEGER), updated_at = '2099-01-01T00:00:00.000Z', \
+                 modified_by_device = 'device-b' WHERE uuid = ?",
+                &[&d_id_s, &s.uuid],
+            )
+            .await;
+            b.tombstone_class(c_id).await.unwrap();
+
+            if b_first {
+                merge_snapshot(&b, &snap(&a).await).await.unwrap();
+                merge_snapshot(&a, &snap(&b).await).await.unwrap();
+            } else {
+                merge_snapshot(&a, &snap(&b).await).await.unwrap();
+                merge_snapshot(&b, &snap(&a).await).await.unwrap();
+            }
+            converge(&a, &b).await;
+
+            for db in [&a, &b] {
+                let (first, deleted, class): (String, Option<String>, String) = sqlx::query_as(
+                    "SELECT s.first_name, s.deleted_at, c.name FROM students s \
+                     JOIN classes c ON c.id = s.class_id WHERE s.uuid = ?",
+                )
+                .bind(&s.uuid)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+                assert_eq!(
+                    (first.as_str(), deleted, class.as_str()),
+                    ("Max", None, "5b"),
+                    "b_first={}",
+                    b_first
+                );
+                let (text, deleted) = obs_text(db, &o.uuid).await;
+                assert_eq!(text, "Hilft anderen", "b_first={}", b_first);
+                assert!(deleted.is_none());
+            }
         }
     }
 
