@@ -427,6 +427,22 @@ npm run tauri:build
 - Single-user mode (hardcoded author_id = 1)
 - No server/cloud functionality
 
+## 📌 SYNC: VERBINDLICHE VORGABEN UND ISA
+
+**Maßgeblich für jede Arbeit am Sync ist `docs/ISA_SYNC.md`.** Sie enthält Anforderungen,
+Entscheidungen und Umsetzungsstand. Sie wird bei jeder Sync-Änderung im selben Commit
+aktualisiert (Status, Datum, neue Entscheidungen, neue offene Punkte).
+
+Verbindliche Vorgaben des Auftraggebers:
+
+1. **Alle Daten werden auf den Server übertragen:** Klassen, Schüler, Kategorien, Beobachtungen,
+   alles Fachliche. Ein neues Gerät ist nach dem ersten Abgleich vollständig.
+2. **Gemeinsame Zeitbasis:** Die App holt die Uhrzeit von einem Zeitserver (NTP) und nutzt diese
+   gemeinsame Zeit für alle Zeitstempel, die beim Abgleich entscheiden. Die lokale Rechneruhr
+   ist dafür nicht maßgeblich.
+
+Die Beschreibung im folgenden Kapitel gibt den älteren Stand wieder; bei Widerspruch gilt die ISA.
+
 ## 🔄 UNIFIED SYNCHRONIZATION SYSTEM
 
 ✅ **FULLY OPERATIONAL** - Consolidated export/import functionality with comprehensive data control and bug fixes.
