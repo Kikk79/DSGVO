@@ -252,7 +252,7 @@ impl WebDavClient {
                                 let name =
                                     urlencoding::decode(last).unwrap_or_default().to_string();
                                 let id = etag.take().filter(|s| !s.is_empty()).or(modified.take());
-                                if !name.is_empty() {
+                                if !name.is_empty() && !name.ends_with(".tmp") {
                                     entries.push(DavEntry { name, etag: id });
                                 }
                             }
@@ -743,5 +743,22 @@ mod tests {
             ]
         );
         assert_eq!(rec[2].body, b"data".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_list_entries_skips_tmp_files() {
+        let xml = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+ <d:response><d:href>/dav/changeset_a_1.dat</d:href><d:propstat><d:prop><d:getetag>"1"</d:getetag></d:prop></d:propstat></d:response>
+ <d:response><d:href>/dav/changeset_a_2.dat.tmp</d:href><d:propstat><d:prop><d:getetag>"2"</d:getetag></d:prop></d:propstat></d:response>
+</d:multistatus>"#;
+        let (url, _log) = fake_server("Mon, 01 Jan 2024 12:00:00 GMT", move |_| Reply {
+            status: 207,
+            body: xml.to_string(),
+        })
+        .await;
+        let res = client(url).list_entries().await.unwrap();
+        let names: Vec<String> = res.value.into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["changeset_a_1.dat".to_string()]);
     }
 }
