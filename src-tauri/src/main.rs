@@ -30,6 +30,12 @@ pub struct Student {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub source_device_id: String,
+    #[serde(default)]
+    pub uuid: String,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+    #[serde(default)]
+    pub modified_by_device: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -46,6 +52,12 @@ pub struct Class {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub source_device_id: String,
+    #[serde(default)]
+    pub uuid: String,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+    #[serde(default)]
+    pub modified_by_device: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow, Clone)]
@@ -60,6 +72,12 @@ pub struct Category {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub source_device_id: String,
+    #[serde(default)]
+    pub uuid: String,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+    #[serde(default)]
+    pub modified_by_device: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
@@ -73,6 +91,12 @@ pub struct Observation {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub source_device_id: String,
+    #[serde(default)]
+    pub uuid: String,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+    #[serde(default)]
+    pub modified_by_device: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

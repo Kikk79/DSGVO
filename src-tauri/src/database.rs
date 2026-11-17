@@ -5,7 +5,8 @@ use crate::{
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
-use crate::sync_time::SyncClock;
+use crate::sync_schema::derived_uuid;
+use crate::sync_time::{format_ts, SyncClock};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,10 +14,9 @@ pub struct Database {
     pool: Pool<Sqlite>,
     crypto: Arc<CryptoManager>,
     /// Pfad der Datenbankdatei (für Sicherungskopien neben der DB).
-    #[allow(dead_code)] // genutzt ab Task 3/9 (Sync v2)
+    #[allow(dead_code)] // genutzt ab Task 9 (Sync v2)
     db_path: PathBuf,
     /// Uhr mit Versatz zur Serverzeit; Versatz aus `sync_config.clock_offset_ms`.
-    #[allow(dead_code)] // genutzt ab Task 3 (Sync v2)
     clock: Arc<SyncClock>,
 }
 
@@ -52,6 +52,43 @@ impl Database {
         };
         db.migrate().await?;
         Ok(db)
+    }
+
+    /// Aktuelle Zeit nach Serverzeit (lokale Uhr plus gemessener Versatz).
+    pub fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.clock.now()
+    }
+
+    /// Serverzeit als Text für `created_at`/`updated_at`.
+    fn now_ts(&self) -> String {
+        format_ts(self.now())
+    }
+
+    /// Füllt fehlende UUIDs (Zeilen aus Importen oder älteren Ständen) mit der abgeleiteten
+    /// UUID. Idempotent: Zeilen mit UUID bleiben unberührt.
+    async fn backfill_missing_uuids(&self) -> Result<()> {
+        for table in ["classes", "students", "categories", "observations"] {
+            let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(&format!(
+                "SELECT id, source_device_id, CAST(created_at AS TEXT) FROM {} WHERE uuid IS NULL OR uuid = ''",
+                table
+            ))
+            .fetch_all(&self.pool)
+            .await?;
+            for (id, source_device_id, created_at) in rows {
+                let uuid = derived_uuid(
+                    table,
+                    &source_device_id,
+                    id,
+                    created_at.as_deref().unwrap_or(""),
+                );
+                sqlx::query(&format!("UPDATE {} SET uuid = ? WHERE id = ?", table))
+                    .bind(uuid)
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn migrate(&self) -> Result<()> {
@@ -197,15 +234,18 @@ impl Database {
             }
         }
 
-        // Seed default categories if none exist
-        self.seed_default_categories().await?;
-
         // Gespeicherten Versatz zur Serverzeit laden (noch nie gemessen: 0)
         let offset_ms: Option<i64> =
             sqlx::query_scalar("SELECT clock_offset_ms FROM sync_config WHERE id = 1")
                 .fetch_optional(&self.pool)
                 .await?;
         self.clock.set_offset_ms(offset_ms.unwrap_or(0));
+
+        // Zeilen ohne UUID (z.B. durch alte Importe) nachtragen
+        self.backfill_missing_uuids().await?;
+
+        // Seed default categories if none exist
+        self.seed_default_categories().await?;
 
         Ok(())
     }
@@ -283,17 +323,22 @@ impl Database {
     // Class operations
     pub async fn create_class(&self, name: String, school_year: String) -> Result<Class> {
         let device_id = self.crypto.get_device_id();
+        let now = self.now_ts();
 
         let class = sqlx::query_as::<_, Class>(
             r#"
-            INSERT INTO classes (name, school_year, source_device_id)
-            VALUES (?, ?, ?)
+            INSERT INTO classes (name, school_year, source_device_id, uuid, modified_by_device, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
         .bind(&name)
         .bind(&school_year)
         .bind(&device_id)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&device_id)
+        .bind(&now)
+        .bind(&now)
         .fetch_one(&self.pool)
         .await
         .context("Failed to create class")?;
@@ -302,7 +347,7 @@ impl Database {
     }
 
     pub async fn get_classes(&self) -> Result<Vec<Class>> {
-        let classes = sqlx::query_as::<_, Class>("SELECT * FROM classes ORDER BY name")
+        let classes = sqlx::query_as::<_, Class>("SELECT * FROM classes WHERE deleted_at IS NULL ORDER BY name")
             .fetch_all(&self.pool)
             .await
             .context("Failed to fetch classes")?;
@@ -330,7 +375,7 @@ impl Database {
         } else {
             // Soft delete: check if class has students
             let student_count = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM students WHERE class_id = ? AND status != 'deleted'",
+                "SELECT COUNT(*) FROM students WHERE class_id = ? AND status != 'deleted' AND deleted_at IS NULL",
             )
             .bind(class_id)
             .fetch_one(&self.pool)
@@ -361,11 +406,12 @@ impl Database {
     ) -> Result<Student> {
         let device_id = self.crypto.get_device_id();
         let status = status.unwrap_or_else(|| "active".to_string());
+        let now = self.now_ts();
 
         let student = sqlx::query_as::<_, Student>(
             r#"
-            INSERT INTO students (class_id, first_name, last_name, status, source_device_id)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO students (class_id, first_name, last_name, status, source_device_id, uuid, modified_by_device, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
@@ -374,6 +420,10 @@ impl Database {
         .bind(&last_name)
         .bind(&status)
         .bind(&device_id)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&device_id)
+        .bind(&now)
+        .bind(&now)
         .fetch_one(&self.pool)
         .await
         .context("Failed to create student")?;
@@ -383,7 +433,7 @@ impl Database {
 
     pub async fn get_students(&self) -> Result<Vec<Student>> {
         let students = sqlx::query_as::<_, Student>(
-            "SELECT * FROM students WHERE status != 'deleted' ORDER BY last_name, first_name",
+            "SELECT * FROM students WHERE status != 'deleted' AND deleted_at IS NULL ORDER BY last_name, first_name",
         )
         .fetch_all(&self.pool)
         .await
@@ -394,7 +444,7 @@ impl Database {
 
     pub async fn get_all_students_including_deleted(&self) -> Result<Vec<Student>> {
         let students =
-            sqlx::query_as::<_, Student>("SELECT * FROM students ORDER BY last_name, first_name")
+            sqlx::query_as::<_, Student>("SELECT * FROM students WHERE deleted_at IS NULL ORDER BY last_name, first_name")
                 .fetch_all(&self.pool)
                 .await
                 .context("Failed to fetch all students")?;
@@ -434,9 +484,10 @@ impl Database {
                     COUNT(*) as observation_count,
                     MAX(created_at) as last_observation_date
                 FROM observations
+                WHERE deleted_at IS NULL
                 GROUP BY student_id
             ) obs_stats ON s.id = obs_stats.student_id
-            WHERE s.status != 'deleted'
+            WHERE s.status != 'deleted' AND s.deleted_at IS NULL AND c.deleted_at IS NULL
             ORDER BY s.last_name, s.first_name
             "#,
         )
@@ -498,8 +549,9 @@ impl Database {
             FROM observations o
             LEFT JOIN students s ON o.student_id = s.id
             LEFT JOIN classes c ON s.class_id = c.id
-            LEFT JOIN categories cat ON o.category = cat.name
+            LEFT JOIN categories cat ON o.category = cat.name AND cat.deleted_at IS NULL
             WHERE s.status != 'deleted'
+              AND o.deleted_at IS NULL AND s.deleted_at IS NULL AND c.deleted_at IS NULL
         "#
         .to_string();
 
@@ -594,7 +646,9 @@ impl Database {
                 .await?;
         } else {
             // Soft delete: mark as deleted
-            sqlx::query("UPDATE students SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+            sqlx::query("UPDATE students SET status = 'deleted', updated_at = ?, modified_by_device = ? WHERE id = ?")
+                .bind(self.now_ts())
+                .bind(self.crypto.get_device_id())
                 .bind(student_id)
                 .execute(&self.pool)
                 .await?;
@@ -615,11 +669,12 @@ impl Database {
         Self::validate_observation_content(&category, &text)?;
         let device_id = self.crypto.get_device_id();
         let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
+        let now = self.now_ts();
 
         let observation = sqlx::query_as::<_, Observation>(
             r#"
-            INSERT INTO observations (student_id, author_id, category, text, tags, source_device_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO observations (student_id, author_id, category, text, tags, source_device_id, uuid, modified_by_device, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
@@ -629,6 +684,10 @@ impl Database {
         .bind(&text)
         .bind(&tags_json)
         .bind(&device_id)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&device_id)
+        .bind(&now)
+        .bind(&now)
         .fetch_one(&self.pool)
         .await
         .context("Failed to create observation")?;
@@ -638,7 +697,7 @@ impl Database {
 
     pub async fn get_observation(&self, observation_id: i64) -> Result<Option<Observation>> {
         let observation =
-            sqlx::query_as::<_, Observation>("SELECT * FROM observations WHERE id = ?")
+            sqlx::query_as::<_, Observation>("SELECT * FROM observations WHERE id = ? AND deleted_at IS NULL")
                 .bind(observation_id)
                 .fetch_optional(&self.pool)
                 .await
@@ -673,12 +732,13 @@ impl Database {
         // merge_existing_observation). updated_at is bound as a UTC timestamp, like the
         // import code does, because it decides which copy wins during sync.
         let result = sqlx::query(
-            "UPDATE observations SET category = ?, text = ?, tags = ?, updated_at = ? WHERE id = ?",
+            "UPDATE observations SET category = ?, text = ?, tags = ?, updated_at = ?, modified_by_device = ? WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(&category)
         .bind(&text)
         .bind(&tags_json)
-        .bind(chrono::Utc::now())
+        .bind(self.now_ts())
+        .bind(self.crypto.get_device_id())
         .bind(observation_id)
         .execute(&self.pool)
         .await
@@ -702,7 +762,7 @@ impl Database {
         student_id: Option<i64>,
         category: Option<String>,
     ) -> Result<Vec<Observation>> {
-        let mut sql = "SELECT * FROM observations WHERE 1=1".to_string();
+        let mut sql = "SELECT * FROM observations WHERE deleted_at IS NULL".to_string();
         let mut params: Vec<String> = Vec::new();
 
         if let Some(q) = query {
@@ -741,7 +801,7 @@ impl Database {
         since: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Observation>> {
         let observations = sqlx::query_as::<_, Observation>(
-            "SELECT * FROM observations WHERE created_at >= ? OR updated_at >= ? ORDER BY created_at DESC",
+            "SELECT * FROM observations WHERE deleted_at IS NULL AND (created_at >= ? OR updated_at >= ?) ORDER BY created_at DESC",
         )
         .bind(since)
         .bind(since)
@@ -777,9 +837,10 @@ impl Database {
             FROM observations o
             LEFT JOIN students s ON o.student_id = s.id
             LEFT JOIN classes c ON s.class_id = c.id
-            LEFT JOIN categories cat ON o.category = cat.name
+            LEFT JOIN categories cat ON o.category = cat.name AND cat.deleted_at IS NULL
             WHERE o.created_at BETWEEN ? AND ?
               AND s.status = 'active'
+              AND o.deleted_at IS NULL AND s.deleted_at IS NULL AND c.deleted_at IS NULL
         "#
         .to_string();
 
@@ -830,7 +891,7 @@ impl Database {
         } else {
             // Check if user is the author
             let author_check = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM observations WHERE id = ? AND author_id = ?",
+                "SELECT COUNT(*) FROM observations WHERE id = ? AND author_id = ? AND deleted_at IS NULL",
             )
             .bind(observation_id)
             .bind(author_id)
@@ -947,11 +1008,19 @@ impl Database {
                         .await?;
 
                 if exists == 0 {
+                    let (uuid, modified_by) = Self::import_stamp(
+                        "observations",
+                        &obs.uuid,
+                        &obs.modified_by_device,
+                        &obs.source_device_id,
+                        obs.id,
+                        obs.created_at,
+                    );
                     // Insert new observation (preserving original ID and timestamps)
                     sqlx::query(
                         r#"
-                        INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id, uuid, modified_by_device)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         "#,
                     )
                     .bind(obs.id)
@@ -962,7 +1031,9 @@ impl Database {
                     .bind(obs.tags)
                     .bind(obs.created_at)
                     .bind(obs.updated_at)
-                    .bind(obs.source_device_id)
+                    .bind(&obs.source_device_id)
+                    .bind(&uuid)
+                    .bind(&modified_by)
                     .execute(&self.pool)
                     .await?;
 
@@ -977,6 +1048,29 @@ impl Database {
             "Successfully imported {} observations",
             imported_count
         ))
+    }
+
+    /// UUID und Änderungsgerät einer importierten Zeile: übernommen, sonst abgeleitet
+    /// (Dateien aus der Zeit vor Sync v2 tragen beides nicht).
+    fn import_stamp(
+        table: &str,
+        uuid: &str,
+        modified_by_device: &str,
+        source_device_id: &str,
+        id: i64,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> (String, String) {
+        let uuid = if uuid.is_empty() {
+            derived_uuid(table, source_device_id, id, &format_ts(created_at))
+        } else {
+            uuid.to_string()
+        };
+        let modified_by = if modified_by_device.is_empty() {
+            source_device_id.to_string()
+        } else {
+            modified_by_device.to_string()
+        };
+        (uuid, modified_by)
     }
 
     /// Last-write-wins merge of an imported observation whose id already exists locally.
@@ -999,13 +1093,20 @@ impl Database {
             return Ok(false);
         }
 
+        let modified_by = if incoming.modified_by_device.is_empty() {
+            incoming.source_device_id.clone()
+        } else {
+            incoming.modified_by_device.clone()
+        };
+
         sqlx::query(
-            "UPDATE observations SET category = ?, text = ?, tags = ?, updated_at = ? WHERE id = ?",
+            "UPDATE observations SET category = ?, text = ?, tags = ?, updated_at = ?, modified_by_device = ? WHERE id = ?",
         )
         .bind(incoming.category)
         .bind(incoming.text)
         .bind(incoming.tags)
         .bind(incoming.updated_at)
+        .bind(modified_by)
         .bind(incoming.id)
         .execute(&self.pool)
         .await?;
@@ -1039,8 +1140,16 @@ impl Database {
                             .await?;
 
                     if exists == 0 {
+                        let (uuid, modified_by) = Self::import_stamp(
+                            "classes",
+                            &class.uuid,
+                            &class.modified_by_device,
+                            &class.source_device_id,
+                            class.id,
+                            class.created_at,
+                        );
                         sqlx::query(
-                            "INSERT INTO classes (id, name, school_year, created_at, updated_at, source_device_id) VALUES (?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO classes (id, name, school_year, created_at, updated_at, source_device_id, uuid, modified_by_device) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         )
                         .bind(class.id)
                         .bind(class.name)
@@ -1048,6 +1157,8 @@ impl Database {
                         .bind(class.created_at)
                         .bind(class.updated_at)
                         .bind(class.source_device_id)
+                        .bind(uuid)
+                        .bind(modified_by)
                         .execute(&self.pool)
                         .await?;
 
@@ -1073,8 +1184,16 @@ impl Database {
 
                     if exists == 0 {
                         // Student doesn't exist - insert new student
+                        let (uuid, modified_by) = Self::import_stamp(
+                            "students",
+                            &student.uuid,
+                            &student.modified_by_device,
+                            &student.source_device_id,
+                            student.id,
+                            student.created_at,
+                        );
                         sqlx::query(
-                            "INSERT INTO students (id, class_id, first_name, last_name, status, created_at, updated_at, source_device_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO students (id, class_id, first_name, last_name, status, created_at, updated_at, source_device_id, uuid, modified_by_device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         )
                         .bind(student.id)
                         .bind(student.class_id)
@@ -1084,6 +1203,8 @@ impl Database {
                         .bind(student.created_at)
                         .bind(student.updated_at)
                         .bind(student.source_device_id)
+                        .bind(uuid)
+                        .bind(modified_by)
                         .execute(&self.pool)
                         .await?;
 
@@ -1100,14 +1221,19 @@ impl Database {
                         if current_status == "deleted" && student.status != "deleted" {
                             // Reactivate deleted student by updating all fields
                             sqlx::query(
-                                "UPDATE students SET class_id = ?, first_name = ?, last_name = ?, status = ?, updated_at = ?, source_device_id = ? WHERE id = ?",
+                                "UPDATE students SET class_id = ?, first_name = ?, last_name = ?, status = ?, updated_at = ?, source_device_id = ?, modified_by_device = ? WHERE id = ?",
                             )
                             .bind(student.class_id)
                             .bind(student.first_name)
                             .bind(student.last_name)
                             .bind(student.status)
                             .bind(student.updated_at)
-                            .bind(student.source_device_id)
+                            .bind(&student.source_device_id)
+                            .bind(if student.modified_by_device.is_empty() {
+                                student.source_device_id.clone()
+                            } else {
+                                student.modified_by_device.clone()
+                            })
                             .bind(student.id)
                             .execute(&self.pool)
                             .await?;
@@ -1116,13 +1242,18 @@ impl Database {
                         } else if student.status == "active" {
                             // Update existing active student with new data
                             sqlx::query(
-                                "UPDATE students SET class_id = ?, first_name = ?, last_name = ?, updated_at = ?, source_device_id = ? WHERE id = ?",
+                                "UPDATE students SET class_id = ?, first_name = ?, last_name = ?, updated_at = ?, source_device_id = ?, modified_by_device = ? WHERE id = ?",
                             )
                             .bind(student.class_id)
                             .bind(student.first_name)
                             .bind(student.last_name)
                             .bind(student.updated_at)
-                            .bind(student.source_device_id)
+                            .bind(&student.source_device_id)
+                            .bind(if student.modified_by_device.is_empty() {
+                                student.source_device_id.clone()
+                            } else {
+                                student.modified_by_device.clone()
+                            })
                             .bind(student.id)
                             .execute(&self.pool)
                             .await?;
@@ -1150,8 +1281,16 @@ impl Database {
                     .await?;
 
                     if exists == 0 {
+                        let (uuid, modified_by) = Self::import_stamp(
+                            "observations",
+                            &obs.uuid,
+                            &obs.modified_by_device,
+                            &obs.source_device_id,
+                            obs.id,
+                            obs.created_at,
+                        );
                         sqlx::query(
-                            "INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id, uuid, modified_by_device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         )
                         .bind(obs.id)
                         .bind(obs.student_id)
@@ -1162,6 +1301,8 @@ impl Database {
                         .bind(obs.created_at)
                         .bind(obs.updated_at)
                         .bind(obs.source_device_id)
+                        .bind(uuid)
+                        .bind(modified_by)
                         .execute(&self.pool)
                         .await?;
 
@@ -1205,6 +1346,7 @@ impl Database {
         }
 
         let device_id = self.crypto.get_device_id();
+        let now = self.now_ts();
 
         // Default categories with appealing colors
         let default_categories = vec![
@@ -1220,8 +1362,8 @@ impl Database {
         for (name, color, bg_color, text_color, sort_order) in default_categories {
             sqlx::query(
                 r#"
-                INSERT INTO categories (name, color, background_color, text_color, is_active, sort_order, source_device_id, uuid, modified_by_device)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO categories (name, color, background_color, text_color, is_active, sort_order, source_device_id, uuid, modified_by_device, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#
             )
             .bind(name)
@@ -1233,6 +1375,8 @@ impl Database {
             .bind(&device_id)
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(&device_id)
+            .bind(&now)
+            .bind(&now)
             .execute(&self.pool)
             .await?;
         }
@@ -1244,7 +1388,7 @@ impl Database {
     // Category CRUD operations
     pub async fn get_categories(&self) -> Result<Vec<crate::Category>> {
         let categories = sqlx::query_as::<_, crate::Category>(
-            "SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order ASC",
+            "SELECT * FROM categories WHERE is_active = 1 AND deleted_at IS NULL ORDER BY sort_order ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -1260,6 +1404,7 @@ impl Database {
         text_color: String,
     ) -> Result<crate::Category> {
         let device_id = self.crypto.get_device_id();
+        let now = self.now_ts();
 
         // Get next sort order
         let max_order: i32 =
@@ -1270,8 +1415,8 @@ impl Database {
 
         let category = sqlx::query_as::<_, crate::Category>(
             r#"
-            INSERT INTO categories (name, color, background_color, text_color, is_active, sort_order, source_device_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO categories (name, color, background_color, text_color, is_active, sort_order, source_device_id, uuid, modified_by_device, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#
         )
@@ -1282,6 +1427,10 @@ impl Database {
         .bind(true)
         .bind(max_order + 1)
         .bind(&device_id)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&device_id)
+        .bind(&now)
+        .bind(&now)
         .fetch_one(&self.pool)
         .await
         .context("Failed to create category")?;
@@ -1299,7 +1448,7 @@ impl Database {
         sqlx::query(
             r#"
             UPDATE categories 
-            SET name = ?, color = ?, background_color = ?, text_color = ?, updated_at = CURRENT_TIMESTAMP
+            SET name = ?, color = ?, background_color = ?, text_color = ?, updated_at = ?, modified_by_device = ?
             WHERE id = ?
             "#
         )
@@ -1307,6 +1456,8 @@ impl Database {
         .bind(&color)
         .bind(&background_color)
         .bind(&text_color)
+        .bind(self.now_ts())
+        .bind(self.crypto.get_device_id())
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -1316,14 +1467,16 @@ impl Database {
     pub async fn delete_category(&self, id: i64, force_delete: bool) -> Result<()> {
         if !force_delete {
             // Check if category is used in observations
-            let usage_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations WHERE category = (SELECT name FROM categories WHERE id = ?)")
+            let usage_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL AND category = (SELECT name FROM categories WHERE id = ?)")
                 .bind(id)
                 .fetch_one(&self.pool)
                 .await?;
 
             if usage_count > 0 {
                 // Soft delete: mark as inactive
-                sqlx::query("UPDATE categories SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                sqlx::query("UPDATE categories SET is_active = 0, updated_at = ?, modified_by_device = ? WHERE id = ?")
+                    .bind(self.now_ts())
+                    .bind(self.crypto.get_device_id())
                     .bind(id)
                     .execute(&self.pool)
                     .await?;
@@ -1376,8 +1529,8 @@ impl Database {
                     sqlx::query(
                         "UPDATE categories SET 
                          color = ?, background_color = ?, text_color = ?, 
-                         is_active = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP,
-                         source_device_id = ?
+                         is_active = ?, sort_order = ?, updated_at = ?,
+                         source_device_id = ?, modified_by_device = ?
                          WHERE id = ?",
                     )
                     .bind(&category.color)
@@ -1385,6 +1538,8 @@ impl Database {
                     .bind(&category.text_color)
                     .bind(category.is_active)
                     .bind(category.sort_order)
+                    .bind(self.now_ts())
+                    .bind(&device_id)
                     .bind(&device_id)
                     .bind(existing_id)
                     .execute(&self.pool)
@@ -1392,8 +1547,8 @@ impl Database {
                 } else {
                     // Create new category
                     sqlx::query(
-                        "INSERT INTO categories (name, color, background_color, text_color, is_active, sort_order, source_device_id) 
-                         VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO categories (name, color, background_color, text_color, is_active, sort_order, source_device_id, uuid, modified_by_device, created_at, updated_at) 
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     )
                     .bind(&category.name)
                     .bind(&category.color)
@@ -1402,6 +1557,14 @@ impl Database {
                     .bind(category.is_active)
                     .bind(category.sort_order)
                     .bind(&device_id)
+                    .bind(if category.uuid.is_empty() {
+                        uuid::Uuid::new_v4().to_string()
+                    } else {
+                        category.uuid.clone()
+                    })
+                    .bind(&device_id)
+                    .bind(self.now_ts())
+                    .bind(self.now_ts())
                     .execute(&self.pool)
                     .await?;
 
@@ -1426,9 +1589,11 @@ impl Database {
                 .map(|_| "?")
                 .collect::<Vec<_>>()
                 .join(", ");
-            let query = format!("UPDATE categories SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE name NOT IN ({})", placeholders);
+            let query = format!("UPDATE categories SET is_active = 0, updated_at = ?, modified_by_device = ? WHERE name NOT IN ({})", placeholders);
 
-            let mut query_builder = sqlx::query(&query);
+            let mut query_builder = sqlx::query(&query)
+                .bind(self.now_ts())
+                .bind(&device_id);
             for name in import_category_names {
                 query_builder = query_builder.bind(name);
             }
@@ -3010,6 +3175,8 @@ mod tests {
     async fn test_update_observation_changes_updated_at_only() {
         let (db, _temp_dir) = create_single_connection_test_db().await;
         let observation = create_test_observation(&db).await;
+        // Zeitstempel haben Millisekunden-Auflösung: sicherstellen, dass die Bearbeitung später liegt
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
         let updated = db
             .update_observation(
@@ -3781,6 +3948,295 @@ zweite Zeile', '[]', '2025-09-05 12:00:00', '2025-09-05T12:00:00Z', 'desktop-B')
             assert!(columns(&pool, "categories").await.contains(&"icon".to_string()));
             assert!(!columns(&pool, "classes").await.contains(&"uuid".to_string()));
             pool.close().await;
+        }
+    }
+
+    mod sync_v2_stamping {
+        use super::*;
+
+        fn within_2s(ts: chrono::DateTime<chrono::Utc>, expected: chrono::DateTime<chrono::Utc>) {
+            let diff = (ts - expected).num_milliseconds().abs();
+            assert!(diff <= 2000, "{} vs {} ({} ms)", ts, expected, diff);
+        }
+
+        #[tokio::test]
+        async fn test_create_stamps_uuid_time_and_device() {
+            let (db, _dir) = create_test_db().await;
+            db.clock.set_offset_ms(3_600_000);
+            let device = db.crypto.get_device_id();
+
+            let class = db.create_class("5a".into(), "2025/26".into()).await.unwrap();
+            let student = db
+                .create_student(class.id, "Max".into(), "Muster".into(), None)
+                .await
+                .unwrap();
+            let category = db
+                .create_category("Neu".into(), "#000".into(), "#111".into(), "#222".into())
+                .await
+                .unwrap();
+            let obs = db
+                .create_observation(student.id, 1, "Sozial".into(), "Text".into(), vec![])
+                .await
+                .unwrap();
+
+            let stamps = [
+                (class.uuid, class.modified_by_device, class.created_at, class.updated_at),
+                (student.uuid, student.modified_by_device, student.created_at, student.updated_at),
+                (category.uuid, category.modified_by_device, category.created_at, category.updated_at),
+                (obs.uuid, obs.modified_by_device, obs.created_at, obs.updated_at),
+            ];
+            for (uuid, modified_by, created, updated) in stamps {
+                assert!(uuid::Uuid::parse_str(&uuid).is_ok(), "uuid {}", uuid);
+                assert_eq!(modified_by, device);
+                within_2s(created, db.now());
+                within_2s(updated, db.now());
+            }
+            assert!(db.now() > chrono::Utc::now() + chrono::Duration::minutes(59));
+        }
+
+        #[tokio::test]
+        async fn test_update_observation_uses_clock() {
+            let (db, _dir) = create_test_db().await;
+            let obs = create_test_observation(&db).await;
+            db.clock.set_offset_ms(3_600_000);
+            let updated = db
+                .update_observation(obs.id, "social".into(), "Neu".into(), vec![])
+                .await
+                .unwrap();
+            within_2s(updated.updated_at, db.now());
+            assert_eq!(updated.uuid, obs.uuid);
+            assert_eq!(updated.modified_by_device, db.crypto.get_device_id());
+        }
+
+        #[tokio::test]
+        async fn test_other_writes_use_clock_and_device() {
+            let (db, _dir) = create_test_db().await;
+            let class = db.create_class("5a".into(), "x".into()).await.unwrap();
+            let student = db
+                .create_student(class.id, "A".into(), "B".into(), None)
+                .await
+                .unwrap();
+            let cat = db.get_categories().await.unwrap().remove(0);
+            db.clock.set_offset_ms(3_600_000);
+            sqlx::query("UPDATE students SET modified_by_device = 'fremd'")
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE categories SET modified_by_device = 'fremd'")
+                .execute(&db.pool)
+                .await
+                .unwrap();
+
+            db.update_category(cat.id, "Sozial2".into(), "#1".into(), "#2".into(), "#3".into())
+                .await
+                .unwrap();
+            db.delete_student(student.id, false).await.unwrap();
+
+            let device = db.crypto.get_device_id();
+            let row: (String, String) =
+                sqlx::query_as("SELECT updated_at, modified_by_device FROM categories WHERE id = ?")
+                    .bind(cat.id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            within_2s(crate::sync_time::parse_ts(&row.0).unwrap(), db.now());
+            assert_eq!(row.1, device);
+            let row: (String, String) =
+                sqlx::query_as("SELECT updated_at, modified_by_device FROM students WHERE id = ?")
+                    .bind(student.id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            within_2s(crate::sync_time::parse_ts(&row.0).unwrap(), db.now());
+            assert_eq!(row.1, device);
+        }
+
+        #[tokio::test]
+        async fn test_seeded_categories_use_clock() {
+            let (db, _dir) = create_test_db().await;
+            let cats = db.get_categories().await.unwrap();
+            assert_eq!(cats.len(), 5);
+            for c in cats {
+                assert!(!c.uuid.is_empty());
+                assert_eq!(c.modified_by_device, db.crypto.get_device_id());
+                within_2s(c.created_at, db.now());
+            }
+        }
+
+        #[tokio::test]
+        async fn test_imports_stamp_uuid_and_device() {
+            let (db, _dir) = create_test_db().await;
+            let backup = serde_json::json!({
+                "data": {
+                    "classes": [{"id": 7, "name": "7a", "school_year": "x",
+                        "created_at": "2025-01-01T08:00:00.000Z", "updated_at": "2025-01-01T08:00:00.000Z",
+                        "source_device_id": "laptop-A"}],
+                    "students": [{"id": 8, "class_id": 7, "first_name": "A", "last_name": "B", "status": "active",
+                        "created_at": "2025-01-01T08:00:00.000Z", "updated_at": "2025-01-01T08:00:00.000Z",
+                        "source_device_id": "laptop-A"}],
+                    "observations": [{"id": 9, "student_id": 8, "author_id": 1, "category": "Sozial", "text": "t", "tags": "[]",
+                        "created_at": "2025-01-01T08:00:00.000Z", "updated_at": "2025-01-01T08:00:00.000Z",
+                        "source_device_id": "laptop-A", "uuid": "11111111-1111-4111-8111-111111111111",
+                        "modified_by_device": "laptop-B"}],
+                    "categories": [{"id": 1, "name": "Importiert", "color": "#1", "background_color": "#2",
+                        "text_color": "#3", "is_active": true, "sort_order": 9,
+                        "created_at": "2025-01-01T08:00:00.000Z", "updated_at": "2025-01-01T08:00:00.000Z",
+                        "source_device_id": "laptop-A"}]
+                }
+            });
+            db.import_full_backup(backup.to_string().as_bytes()).await.unwrap();
+
+            let obs = db.get_observation(9).await.unwrap().unwrap();
+            assert_eq!(obs.uuid, "11111111-1111-4111-8111-111111111111");
+            assert_eq!(obs.modified_by_device, "laptop-B");
+            let classes = db.get_classes().await.unwrap();
+            let class = classes.iter().find(|c| c.id == 7).unwrap();
+            assert_eq!(
+                class.uuid,
+                derived_uuid("classes", "laptop-A", 7, "2025-01-01T08:00:00.000Z")
+            );
+            assert_eq!(class.modified_by_device, "laptop-A");
+            let students = db.get_students().await.unwrap();
+            assert!(!students[0].uuid.is_empty());
+            let cats = db.get_categories().await.unwrap();
+            let imported = cats.iter().find(|c| c.name == "Importiert").unwrap();
+            assert!(!imported.uuid.is_empty());
+            assert_eq!(imported.modified_by_device, db.crypto.get_device_id());
+            let missing: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM categories WHERE uuid IS NULL OR uuid = '' OR modified_by_device = ''",
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(missing, 0);
+        }
+
+        async fn assess(db: &Database) -> usize {
+            db.get_assessments_comprehensive(
+                50,
+                0,
+                "observation_created_at".into(),
+                "desc".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .len()
+        }
+
+        #[tokio::test]
+        async fn test_reads_hide_tombstones() {
+            let (db, _dir) = create_test_db().await;
+            let obs = create_test_observation(&db).await;
+            let class2 = db.create_class("6b".into(), "x".into()).await.unwrap();
+            let student2 = db
+                .create_student(class2.id, "C".into(), "D".into(), None)
+                .await
+                .unwrap();
+            let obs2 = db
+                .create_observation(student2.id, 1, "Sozial".into(), "zwei".into(), vec![])
+                .await
+                .unwrap();
+            let cat_count = db.get_categories().await.unwrap().len();
+            let tomb = "2026-01-01T00:00:00.000Z";
+
+            let ts = chrono::Utc::now() - chrono::Duration::days(1);
+            let end = chrono::Utc::now() + chrono::Duration::days(1);
+            assert_eq!(assess(&db).await, 2);
+
+            // Beobachtung 1 hat Löschvermerk
+            sqlx::query("UPDATE observations SET deleted_at = ? WHERE id = ?")
+                .bind(tomb)
+                .bind(obs.id)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            assert!(db.get_observation(obs.id).await.unwrap().is_none());
+            assert_eq!(db.search_observations(None, None, None).await.unwrap().len(), 1);
+            assert_eq!(db.get_observations_since(ts).await.unwrap().len(), 1);
+            assert_eq!(
+                db.get_calendar_observations(ts, end, None, None).await.unwrap().len(),
+                1
+            );
+            assert_eq!(assess(&db).await, 1);
+            let stats = db.get_students_with_stats().await.unwrap();
+            assert_eq!(stats.iter().map(|s| s.observation_count).sum::<i64>(), 1);
+
+            // Schüler 2 hat Löschvermerk -> auch seine Beobachtung verschwindet
+            sqlx::query("UPDATE students SET deleted_at = ? WHERE id = ?")
+                .bind(tomb)
+                .bind(student2.id)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(db.get_students().await.unwrap().len(), 1);
+            assert_eq!(db.get_all_students_including_deleted().await.unwrap().len(), 1);
+            assert_eq!(db.get_students_with_stats().await.unwrap().len(), 1);
+            assert_eq!(assess(&db).await, 0);
+            assert_eq!(
+                db.get_calendar_observations(ts, end, None, None).await.unwrap().len(),
+                0
+            );
+            let _ = obs2;
+
+            // Klasse 2 mit Löschvermerk
+            sqlx::query("UPDATE classes SET deleted_at = ? WHERE id = ?")
+                .bind(tomb)
+                .bind(class2.id)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(db.get_classes().await.unwrap().len(), 1);
+
+            // Kategorie mit Löschvermerk
+            sqlx::query("UPDATE categories SET deleted_at = ? WHERE name = 'Sozial'")
+                .bind(tomb)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(db.get_categories().await.unwrap().len(), cat_count - 1);
+        }
+
+        #[tokio::test]
+        async fn test_startup_backfills_missing_uuids() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("test.db");
+            let crypto = Arc::new(CryptoManager::new().unwrap());
+            {
+                let db = Database::new(&path, crypto.clone()).await.unwrap();
+                sqlx::query("INSERT INTO classes (id, name, school_year, created_at, updated_at, source_device_id) VALUES (4, '4a', 'x', '2025-03-01 10:00:00', '2025-03-01 10:00:00', 'dev-X')")
+                    .execute(&db.pool).await.unwrap();
+                sqlx::query("INSERT INTO students (id, class_id, first_name, last_name, status, created_at, updated_at, source_device_id, uuid) VALUES (5, 4, 'A', 'B', 'active', '2025-03-01 10:00:00', '2025-03-01 10:00:00', 'dev-X', '')")
+                    .execute(&db.pool).await.unwrap();
+                sqlx::query("INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id) VALUES (6, 5, 1, 'Sozial', 't', '[]', '2025-03-01 10:00:00', '2025-03-01 10:00:00', 'dev-X')")
+                    .execute(&db.pool).await.unwrap();
+                sqlx::query("UPDATE categories SET uuid = NULL WHERE name = 'Sozial'")
+                    .execute(&db.pool).await.unwrap();
+                db.pool.close().await;
+            }
+            let db = Database::new(&path, crypto.clone()).await.unwrap();
+            let u: String = sqlx::query_scalar("SELECT uuid FROM classes WHERE id = 4")
+                .fetch_one(&db.pool).await.unwrap();
+            assert_eq!(u, derived_uuid("classes", "dev-X", 4, "2025-03-01 10:00:00"));
+            let u: String = sqlx::query_scalar("SELECT uuid FROM observations WHERE id = 6")
+                .fetch_one(&db.pool).await.unwrap();
+            assert_eq!(u, derived_uuid("observations", "dev-X", 6, "2025-03-01 10:00:00"));
+            let missing: i64 = sqlx::query_scalar(
+                "SELECT (SELECT COUNT(*) FROM classes WHERE uuid IS NULL OR uuid = '') + (SELECT COUNT(*) FROM students WHERE uuid IS NULL OR uuid = '') + (SELECT COUNT(*) FROM categories WHERE uuid IS NULL OR uuid = '') + (SELECT COUNT(*) FROM observations WHERE uuid IS NULL OR uuid = '')",
+            ).fetch_one(&db.pool).await.unwrap();
+            assert_eq!(missing, 0);
+            let before: Vec<(i64, String)> = sqlx::query_as("SELECT id, uuid FROM categories ORDER BY id")
+                .fetch_all(&db.pool).await.unwrap();
+            db.pool.close().await;
+            // idempotent
+            let db = Database::new(&path, crypto).await.unwrap();
+            let after: Vec<(i64, String)> = sqlx::query_as("SELECT id, uuid FROM categories ORDER BY id")
+                .fetch_all(&db.pool).await.unwrap();
+            assert_eq!(before, after);
         }
     }
 }
