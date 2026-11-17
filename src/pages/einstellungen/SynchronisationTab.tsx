@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
 import { Check, Download, RefreshCw, Upload, X } from 'lucide-react';
-import { useAppStore } from '../../stores/appStore';
+import { useAppStore, type DeviceRole, type ManualSyncResult } from '../../stores/appStore';
 import { bumpDataVersion } from '../../stores/uiStore';
 import { errorMessage } from '../../lib/errors';
 import { formatDateTime, isoDate } from '../../lib/format';
@@ -11,7 +11,7 @@ import { Button } from '../../components/ui/Button';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Field } from '../../components/ui/Field';
 import { Input } from '../../components/ui/Input';
-import { Select } from '../../components/ui/Select';
+import { SegmentedControl } from '../../components/ui/SegmentedControl';
 import { useToast } from '../../components/ui/toastContext';
 import { FactList, InlineError, Notice, Section } from './parts';
 import { readFileText } from './backup';
@@ -19,13 +19,44 @@ import { readFileText } from './backup';
 /** Zeitpunkt des letzten manuellen Abgleichs in dieser Sitzung (das Backend speichert ihn nicht immer). */
 let lastManualSyncAt: string | null = null;
 
-const RANGE_OPTIONS = [
-  { value: '7', label: 'Letzte 7 Tage' },
-  { value: '30', label: 'Letzte 30 Tage' },
-  { value: '90', label: 'Letzte 90 Tage' },
-  { value: '365', label: 'Letztes Jahr' },
-  { value: '99999', label: 'Alle Beobachtungen' },
-];
+const ROLE_LABEL: Record<DeviceRole, string> = { laptop: 'Laptop', desktop: 'Desktop' };
+
+const WAITING_TEXT = 'Warte auf den Stand vom Laptop';
+const NO_LAPTOP_TEXT = 'Kein Laptop gefunden. Bitte auf dem Laptop einmal synchronisieren.';
+
+/** „Rechneruhr weicht 3 Sekunden von der Serverzeit ab“ – leer, wenn die Abweichung unter einer Sekunde liegt. */
+function clockOffsetText(offsetMs: number): string | null {
+  const seconds = Math.round(Math.abs(offsetMs) / 1000);
+  if (seconds < 1) return null;
+  if (seconds < 120) return `Rechneruhr weicht ${seconds} ${seconds === 1 ? 'Sekunde' : 'Sekunden'} von der Serverzeit ab`;
+  const minutes = Math.round(seconds / 60);
+  return `Rechneruhr weicht ${minutes} Minuten von der Serverzeit ab`;
+}
+
+/** Meldung nach einem manuellen Abgleich. */
+function outcomeMessage(result: ManualSyncResult): { tone: 'success' | 'info' | 'error'; text: string } {
+  switch (result.outcome) {
+    case 'synced': {
+      const report = result.report;
+      if (!report) return { tone: 'success', text: 'Abgleich abgeschlossen.' };
+      const parts = [
+        report.inserted > 0 ? `${report.inserted} neu` : null,
+        report.updated > 0 ? `${report.updated} geändert` : null,
+        report.tombstoned > 0 ? `${report.tombstoned} gelöscht` : null,
+      ].filter(Boolean);
+      return {
+        tone: 'success',
+        text: parts.length ? `Abgleich abgeschlossen: ${parts.join(', ')}.` : 'Abgleich abgeschlossen. Es gab nichts Neues.',
+      };
+    }
+    case 'waiting_for_laptop':
+      return { tone: 'info', text: `${WAITING_TEXT}.` };
+    case 'no_laptop_found':
+      return { tone: 'info', text: NO_LAPTOP_TEXT };
+    default:
+      return { tone: 'error', text: 'Die Synchronisation ist nicht eingerichtet.' };
+  }
+}
 
 type TestState = { kind: 'idle' } | { kind: 'testing' } | { kind: 'ok' } | { kind: 'failed'; message: string };
 
@@ -41,6 +72,7 @@ export function SynchronisationTab() {
   const getWebDavSyncStatus = useAppStore((state) => state.getWebDavSyncStatus);
   const configureWebDav = useAppStore((state) => state.configureWebDav);
   const triggerManualSync = useAppStore((state) => state.triggerManualSync);
+  const deviceRole = useAppStore((state) => state.deviceRole);
   const toast = useToast();
 
   const [statusLoaded, setStatusLoaded] = useState(false);
@@ -115,12 +147,10 @@ export function SynchronisationTab() {
     setSaveError(null);
     try {
       await configureWebDav(url.trim(), username.trim(), password);
-      lastManualSyncAt = new Date().toISOString();
-      setLastManual(lastManualSyncAt);
       setPassword('');
       setFormOpen(false);
       bumpDataVersion();
-      toast.success('Synchronisation eingerichtet. Der erste Abgleich ist abgeschlossen.');
+      toast.success('Synchronisation eingerichtet.');
     } catch (error) {
       console.error('WebDAV konnte nicht eingerichtet werden:', error);
       setSaveError(errorMessage(error, 'Die Synchronisation konnte nicht eingerichtet werden.'));
@@ -133,11 +163,18 @@ export function SynchronisationTab() {
     setSyncing(true);
     setSyncError(null);
     try {
-      await triggerManualSync();
-      lastManualSyncAt = new Date().toISOString();
-      setLastManual(lastManualSyncAt);
-      bumpDataVersion();
-      toast.success('Abgleich abgeschlossen.');
+      const result = await triggerManualSync();
+      const message = outcomeMessage(result);
+      if (message.tone === 'error') {
+        setSyncError(message.text);
+      } else {
+        if (result.outcome === 'synced') {
+          lastManualSyncAt = new Date().toISOString();
+          setLastManual(lastManualSyncAt);
+          bumpDataVersion();
+        }
+        toast[message.tone](message.text);
+      }
     } catch (error) {
       console.error('Manueller Abgleich fehlgeschlagen:', error);
       setSyncError(errorMessage(error, 'Der Abgleich ist fehlgeschlagen.'));
@@ -161,6 +198,12 @@ export function SynchronisationTab() {
     }
   };
 
+  const offsetText = clockOffsetText(sync.clockOffsetMs ?? 0);
+  const waiting =
+    configured &&
+    (sync.lastOutcome === 'waiting_for_laptop' || (deviceRole === 'desktop' && sync.firstSyncDone === false));
+  const noLaptop = configured && sync.lastOutcome === 'no_laptop_found';
+
   let statusText = 'Nicht eingerichtet';
   if (configured && active) statusText = 'Eingerichtet und aktiv';
   else if (configured) statusText = 'Angehalten bis zum nächsten Start der App';
@@ -173,9 +216,9 @@ export function SynchronisationTab() {
         description={
           <>
             <p>
-              Wenn Sie auf zwei Geräten arbeiten, zum Beispiel am Schulrechner und am Notebook, gleicht die App Ihre
-              Beobachtungen über einen gemeinsamen Ordner auf einem WebDAV-Server ab (etwa die Nextcloud Ihrer Schule).
-              Jedes Gerät legt dort seine Änderungen ab und übernimmt die des anderen.
+              Wenn Sie auf zwei Geräten arbeiten, zum Beispiel am Laptop und am Arbeitsplatzrechner, gleicht die App Ihre
+              Daten über einen gemeinsamen Ordner auf einem WebDAV-Server ab (etwa die Nextcloud Ihrer Schule). Jedes
+              Gerät legt dort seinen Stand ab und übernimmt den des anderen.
             </p>
             <p>
               Das geschieht beim Start, alle drei Minuten und beim Schließen der App. Mit „Jetzt synchronisieren“
@@ -197,8 +240,23 @@ export function SynchronisationTab() {
               ...(configured
                 ? [{ label: 'Letzter Abgleich', value: lastSync ? formatDateTime(lastSync) : 'In dieser Sitzung noch keiner' }]
                 : []),
+              ...(configured && offsetText ? [{ label: 'Uhrzeit', value: offsetText }] : []),
             ]}
           />
+        )}
+
+        {waiting && (
+          <Notice title={WAITING_TEXT}>
+            <p>
+              Dieses Gerät ist als Desktop eingestellt und übernimmt beim ersten Abgleich den Stand vom Laptop. Bitte
+              synchronisieren Sie einmal auf dem Laptop; danach klappt es hier.
+            </p>
+          </Notice>
+        )}
+        {noLaptop && (
+          <Notice tone="warning" title="Kein Laptop gefunden">
+            <p>Kein Laptop gefunden. Bitte auf dem Laptop einmal synchronisieren.</p>
+          </Notice>
         )}
 
         {syncError && <InlineError>{syncError}</InlineError>}
@@ -276,29 +334,33 @@ export function SynchronisationTab() {
         )}
       </Section>
 
+      <RoleSection />
+
       <Section id="sync-umfang" title="Was abgeglichen wird">
         <ul className="max-w-measure list-disc space-y-2 pl-5 text-ui text-ink marker:text-ink-muted">
-          <li>Beobachtungen der letzten 30 Tage, auch spätere Änderungen daran.</li>
           <li>
-            Nicht abgeglichen werden Schüler, Klassen und Kategorien. Sie müssen auf beiden Geräten gleich vorhanden sein.
-            Am einfachsten: auf dem ersten Gerät eine Sicherung erstellen und auf dem neuen Gerät einspielen (
-            <Link to="/einstellungen/daten" className="link">
-              Reiter „Daten“
-            </Link>
-            ).
+            Alles: Klassen, Schüler, Kategorien und Beobachtungen, einschließlich Löschungen. Wenn Sie auf einem Gerät
+            etwas löschen, verschwindet es beim nächsten Abgleich auch auf dem anderen.
+          </li>
+          <li>
+            Wird an beiden Geräten dasselbe geändert, gilt die jüngere Änderung. Die App vergleicht dazu die Uhrzeiten
+            der Geräte; stimmen sie nicht, zeigt sie oben die Abweichung an.
+          </li>
+          <li>
+            Beim ersten Abgleich übernimmt ein Desktop den Stand vom Laptop. Was auf dem Desktop schon liegt, wird dabei
+            ersetzt; vorher legt die App eine Sicherungskopie der Datenbank an. Danach werden beide Geräte normal
+            zusammengeführt.
           </li>
         </ul>
-        <Notice tone="warning" title="Löschungen werden nicht übertragen">
-          <p>
-            Wenn Sie eine Beobachtung auf einem Gerät löschen, bleibt sie auf dem anderen erhalten und kann beim nächsten
-            Abgleich zurückkommen. Löschen Sie sie deshalb auf beiden Geräten.
-          </p>
-        </Notice>
         <Notice>
           <p>
-            Die Dateien liegen unverschlüsselt auf dem Server. Sie enthalten Text, Kategorie und Schlagwörter der
-            Beobachtungen; Schüler sind darin nur über eine interne Nummer zugeordnet, nicht mit Namen. Nutzen Sie nur
-            einen Server, den Ihre Schule für solche Daten freigegeben hat.
+            Die Dateien liegen unverschlüsselt auf dem Server. Sie enthalten Klassen, Namen der Schüler, Kategorien und
+            den Text der Beobachtungen. Nutzen Sie nur einen Server, den Ihre Schule für solche Daten freigegeben hat.
+            Zusätzlich können Sie eine Sicherung im{' '}
+            <Link to="/einstellungen/daten" className="link">
+              Reiter „Daten“
+            </Link>{' '}
+            erstellen.
           </p>
         </Notice>
       </Section>
@@ -327,7 +389,6 @@ export function SynchronisationTab() {
 function FileExchange() {
   const toast = useToast();
   const fileInput = useRef<HTMLInputElement>(null);
-  const [range, setRange] = useState('30');
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -342,7 +403,7 @@ function FileExchange() {
         filters: [{ name: 'Änderungsdatei', extensions: ['dat'] }],
       });
       if (!filePath) return;
-      await invoke<string>('export_changeset_to_file', { filePath, daysBack: Number(range) });
+      await invoke<string>('export_changeset_to_file', { filePath });
       toast.success(`Änderungsdatei gespeichert: ${filePath}`);
     } catch (exportError) {
       console.error('Änderungsdatei konnte nicht gespeichert werden:', exportError);
@@ -388,7 +449,7 @@ function FileExchange() {
         /checksum/i.test(String(importError))
           ? 'Die Datei ist beschädigt oder wurde verändert und wurde nicht eingelesen.'
           : /foreign key/i.test(String(importError))
-            ? 'Die Datei enthält Beobachtungen zu Schülern, die es auf diesem Gerät nicht gibt. Übertragen Sie zuerst die Schüler per Sicherung.'
+            ? 'Die Datei passt nicht zu den Daten auf diesem Gerät.'
             : errorMessage(importError, 'Die Änderungsdatei konnte nicht eingelesen werden.'),
       );
     } finally {
@@ -403,20 +464,11 @@ function FileExchange() {
       description={
         <p>
           Ohne Server geht es auch von Hand: Speichern Sie eine Änderungsdatei, bringen Sie sie zum anderen Gerät (etwa
-          per USB-Stick) und lesen Sie sie dort ein. Es gelten dieselben Regeln wie oben.
+          per USB-Stick) und lesen Sie sie dort ein. Die Datei enthält immer den ganzen Stand, und es gelten dieselben Regeln wie oben.
         </p>
       }
     >
       <div className="flex max-w-measure flex-wrap items-end gap-3">
-        <Field label="Zeitraum" className="w-56">
-          <Select value={range} onChange={(event) => setRange(event.target.value)}>
-            {RANGE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
-        </Field>
         <Button variant="secondary" icon={<Download />} onClick={() => void handleExport()} loading={exporting}>
           Änderungsdatei speichern
         </Button>
@@ -435,6 +487,93 @@ function FileExchange() {
         />
       </div>
       {error && <InlineError>{error}</InlineError>}
+    </Section>
+  );
+}
+
+/** Geräterolle anzeigen und ändern. */
+function RoleSection() {
+  const role = useAppStore((state) => state.deviceRole);
+  const setDeviceRole = useAppStore((state) => state.setDeviceRole);
+  const toast = useToast();
+  const [editing, setEditing] = useState(false);
+  const [choice, setChoice] = useState<DeviceRole>('laptop');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const startEditing = () => {
+    setChoice(role ?? 'laptop');
+    setError(null);
+    setEditing(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await setDeviceRole(choice);
+      setEditing(false);
+      toast.success(`Dieses Gerät ist jetzt als ${ROLE_LABEL[choice]} eingestellt.`);
+    } catch (saveError) {
+      console.error('Geräterolle konnte nicht gespeichert werden:', saveError);
+      setError(errorMessage(saveError, 'Die Geräterolle konnte nicht gespeichert werden.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Section
+      id="sync-rolle"
+      title="Geräterolle"
+      description={
+        <p>
+          Der Laptop ist maßgeblich: Dort sammeln Sie Beobachtungen. Ein Desktop übernimmt beim allerersten Abgleich den
+          Stand vom Laptop. Danach hat die Rolle keine Wirkung mehr auf den Abgleich.
+        </p>
+      }
+    >
+      <FactList
+        items={[
+          { label: 'Dieses Gerät', value: <span className="font-semibold">{role ? ROLE_LABEL[role] : 'Nicht gewählt'}</span> },
+        ]}
+      />
+      {editing ? (
+        <div className="max-w-measure space-y-4 border-l-[3px] border-line pl-5">
+          <SegmentedControl<DeviceRole>
+            ariaLabel="Geräterolle"
+            value={choice}
+            onChange={setChoice}
+            options={[
+              { value: 'laptop', label: 'Laptop' },
+              { value: 'desktop', label: 'Desktop' },
+            ]}
+          />
+          {choice === 'desktop' && role !== 'desktop' && (
+            <Notice tone="warning">
+              <p>
+                Ein Desktop übernimmt beim ersten Abgleich den Stand vom Laptop und ersetzt dabei die Daten auf diesem
+                Gerät.
+              </p>
+            </Notice>
+          )}
+          {error && <InlineError>{error}</InlineError>}
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={() => void handleSave()} loading={saving} disabled={choice === role}>
+              Rolle speichern
+            </Button>
+            <Button variant="ghost" onClick={() => setEditing(false)} disabled={saving}>
+              Abbrechen
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <Button variant="secondary" onClick={startEditing}>
+            Rolle ändern
+          </Button>
+        </div>
+      )}
     </Section>
   );
 }

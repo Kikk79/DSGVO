@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AppShell } from './components/layout/AppShell';
+import { DeviceRoleGate } from './components/layout/DeviceRoleGate';
 import { ObservationEditorProvider } from './components/observations/ObservationEditorProvider';
 import { ToastProvider } from './components/ui/Toast';
 import { HeutePage } from './pages/heute/HeutePage';
@@ -37,19 +38,21 @@ function App() {
   return (
     <BrowserRouter>
       <ToastProvider>
-        <ObservationEditorProvider>
-          <Routes>
-            <Route element={<AppShell loadError={loadError} onRetry={() => void load()} />}>
-              <Route path="/" element={<HeutePage />} />
-              <Route path="/schueler" element={<SchuelerPage />} />
-              <Route path="/schueler/:id" element={<SchuelerAktePage />} />
-              <Route path="/beobachtungen" element={<BeobachtungenPage />} />
-              <Route path="/einstellungen" element={<Navigate to="/einstellungen/kategorien" replace />} />
-              <Route path="/einstellungen/:tab" element={<EinstellungenPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Route>
-          </Routes>
-        </ObservationEditorProvider>
+        <DeviceRoleGate>
+          <ObservationEditorProvider>
+            <Routes>
+              <Route element={<AppShell loadError={loadError} onRetry={() => void load()} />}>
+                <Route path="/" element={<HeutePage />} />
+                <Route path="/schueler" element={<SchuelerPage />} />
+                <Route path="/schueler/:id" element={<SchuelerAktePage />} />
+                <Route path="/beobachtungen" element={<BeobachtungenPage />} />
+                <Route path="/einstellungen" element={<Navigate to="/einstellungen/kategorien" replace />} />
+                <Route path="/einstellungen/:tab" element={<EinstellungenPage />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Route>
+            </Routes>
+          </ObservationEditorProvider>
+        </DeviceRoleGate>
       </ToastProvider>
     </BrowserRouter>
   );

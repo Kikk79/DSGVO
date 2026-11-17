@@ -58,11 +58,33 @@ export interface WebDavConfig {
 
 export type WebDavSyncStatus = 'idle' | 'syncing' | 'success' | 'error';
 
+export type DeviceRole = 'laptop' | 'desktop';
+
+export type SyncOutcome = 'synced' | 'waiting_for_laptop' | 'no_laptop_found' | 'not_configured';
+
+export interface SyncReport {
+  inserted: number;
+  updated: number;
+  tombstoned: number;
+  skipped: number;
+}
+
+export interface ManualSyncResult {
+  outcome: SyncOutcome;
+  report?: SyncReport;
+}
+
 export interface WebDavSyncState {
   status: WebDavSyncStatus;
   lastSyncTime: string | null;
   error: string | null;
   config: WebDavConfig | null;
+  /** Abweichung der Rechneruhr von der Serverzeit in Millisekunden (positiv: Rechner geht vor). */
+  clockOffsetMs?: number;
+  /** Ergebnis des letzten Abgleichs, wie vom Backend gemeldet. */
+  lastOutcome?: string | null;
+  /** Beim Desktop: Stand des Laptops wurde schon einmal übernommen. */
+  firstSyncDone?: boolean;
 }
 
 export interface ActivePin {
@@ -211,7 +233,7 @@ interface AppState {
   // eslint-disable-next-line no-unused-vars
   importChangesetFromFile: (filePath: string) => Promise<string>;
   // eslint-disable-next-line no-unused-vars
-  exportAllData: (daysBack?: number) => Promise<string>;
+  exportAllData: () => Promise<string>;
   // eslint-disable-next-line no-unused-vars
   importFullBackup: (filePath: string) => Promise<string>;
   // eslint-disable-next-line no-unused-vars
@@ -245,13 +267,19 @@ interface AppState {
   // eslint-disable-next-line no-unused-vars
   setDatabasePath: (newPath: string) => Promise<void>;
   
+  // Device role (Laptop/Desktop)
+  deviceRole: DeviceRole | null;
+  getDeviceRole: () => Promise<DeviceRole | null>;
+  getDeviceRoleSuggestion: () => Promise<DeviceRole>;
+  setDeviceRole: (role: DeviceRole) => Promise<void>;
+
   // WebDAV Sync Management
   webdavSync: WebDavSyncState;
   // eslint-disable-next-line no-unused-vars
   configureWebDav: (url: string, username: string, password: string) => Promise<void>;
   // eslint-disable-next-line no-unused-vars
   testWebDavConnection: (url: string, username: string, password: string) => Promise<boolean>;
-  triggerManualSync: () => Promise<void>;
+  triggerManualSync: () => Promise<ManualSyncResult>;
   getWebDavSyncStatus: () => Promise<void>;
   disableWebDavSync: () => Promise<void>;
   // eslint-disable-next-line no-unused-vars
@@ -284,6 +312,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   error: null,
   syncStatus: null,
   deviceConfig: null,
+  deviceRole: null,
   currentPin: null,
   databasePath: null,
 
@@ -639,12 +668,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  exportAllData: async (daysBack?: number): Promise<string> => {
+  exportAllData: async (): Promise<string> => {
     set({ loading: true, error: null });
     try {
-      const result = await invoke('export_all_data', { 
-        daysBack: daysBack 
-      }) as string;
+      const result = await invoke('export_all_data') as string;
       set({ loading: false, error: null });
       return result;
     } catch (err) {
@@ -751,6 +778,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
       throw err;
     }
+  },
+
+  // Device role implementations
+  getDeviceRole: async (): Promise<DeviceRole | null> => {
+    const role = (await invoke('get_device_role')) as DeviceRole | null;
+    set({ deviceRole: role });
+    return role;
+  },
+
+  getDeviceRoleSuggestion: async (): Promise<DeviceRole> => {
+    return (await invoke('get_device_role_suggestion')) as DeviceRole;
+  },
+
+  setDeviceRole: async (role: DeviceRole) => {
+    await invoke('set_device_role', { role });
+    set({ deviceRole: role });
+    await get().getWebDavSyncStatus();
   },
 
   // PIN Management implementations
@@ -1000,8 +1044,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     
     try {
-      const result = await invoke('trigger_manual_sync') as string;
-      console.log('✅ Manual sync completed:', result);
+      const result = await invoke('trigger_manual_sync') as ManualSyncResult;
       
       // Reload status to get updated lastSync timestamp
       await get().getWebDavSyncStatus();
@@ -1020,6 +1063,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           error: null 
         } 
       });
+      return result;
     } catch (error) {
       console.error('❌ Manual sync failed:', error);
       set({ 
@@ -1041,13 +1085,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         last_sync: string | null;
         url: string | null;
         username: string | null;
+        clock_offset_ms?: number;
+        device_role?: string | null;
+        first_sync_done?: boolean;
+        last_outcome?: string | null;
       };
       
       set({ 
         webdavSync: {
-          status: status.active ? 'idle' : 'idle',
+          status: 'idle',
           lastSyncTime: status.last_sync,
           error: null,
+          clockOffsetMs: status.clock_offset_ms ?? 0,
+          firstSyncDone: status.first_sync_done ?? false,
+          lastOutcome: status.last_outcome ?? null,
           config: status.configured && status.url && status.username ? {
             url: status.url,
             username: status.username,
