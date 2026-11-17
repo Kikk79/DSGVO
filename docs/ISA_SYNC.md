@@ -18,7 +18,7 @@ Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 | ID | Anforderung | Begründung | Status |
 |---|---|---|---|
 | A1 | Global eindeutige IDs (UUID) für alle synchronisierten Datensätze | Jedes Gerät zählt heute eigene Auto-Increment-IDs; Kollisionen führen dazu, dass fremde Datensätze stillschweigend nicht übernommen werden | offen |
-| A2 | Löschungen synchronisieren (Löschmarker/Tombstones) | Gelöschte Datensätze kommen heute vom anderen Gerät zurück | offen |
+| A2 | Löschungen synchronisieren (Löschmarker/Tombstones) | Gelöschte Datensätze kommen heute vom anderen Gerät zurück | teilweise (lokal: Löschvermerke mit Kaskade, Inhalte geleert; Sync der Vermerke folgt) |
 | A3 | Import in einer Transaktion | Abgebrochener Import bleibt heute halb angewendet | offen |
 | A4 | Konfliktregel: jüngere Fassung gewinnt, gemessen an V2-Zeit | heute last-writer-wins auf lokaler Uhr (`updated_at`) | teilweise (nur Beobachtungen, lokale Uhr) |
 | A5 | Abhängigkeiten in richtiger Reihenfolge importieren (Klasse → Schüler → Beobachtung; Kategorien vor Beobachtungen) | Fremdschlüssel (`PRAGMA foreign_keys=ON`) lassen Importe sonst scheitern | offen |

@@ -356,23 +356,7 @@ impl Database {
     }
 
     pub async fn delete_class(&self, class_id: i64, force_delete: bool) -> Result<()> {
-        if force_delete {
-            // Hard delete: remove class and all related data
-            sqlx::query("DELETE FROM observations WHERE student_id IN (SELECT id FROM students WHERE class_id = ?)")
-                .bind(class_id)
-                .execute(&self.pool)
-                .await?;
-
-            sqlx::query("DELETE FROM students WHERE class_id = ?")
-                .bind(class_id)
-                .execute(&self.pool)
-                .await?;
-
-            sqlx::query("DELETE FROM classes WHERE id = ?")
-                .bind(class_id)
-                .execute(&self.pool)
-                .await?;
-        } else {
+        if !force_delete {
             // Soft delete: check if class has students
             let student_count = sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM students WHERE class_id = ? AND status != 'deleted' AND deleted_at IS NULL",
@@ -386,13 +370,61 @@ impl Database {
                     "Cannot delete class with active students. Use force delete or remove students first."
                 ));
             }
-
-            sqlx::query("DELETE FROM classes WHERE id = ?")
-                .bind(class_id)
-                .execute(&self.pool)
-                .await?;
         }
 
+        self.tombstone_class(class_id).await
+    }
+
+    /// Löscht eine Klasse endgültig als Löschvermerk: Name wird geleert, Schüler und deren
+    /// Beobachtungen werden in derselben Transaktion ebenfalls zu inhaltslosen Löschvermerken.
+    pub async fn tombstone_class(&self, class_id: i64) -> Result<()> {
+        let now = self.now_ts();
+        let device = self.crypto.get_device_id();
+        let mut tx = self.pool.begin().await?;
+        Self::tombstone_students_in(&mut tx, "class_id = ?", class_id, &now, &device).await?;
+        sqlx::query(
+            "UPDATE classes SET name = '', deleted_at = ?, updated_at = ?, modified_by_device = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(&device)
+        .bind(class_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Vermerkt Schüler (gefiltert über `filter`) samt Beobachtungen als gelöscht.
+    async fn tombstone_students_in(
+        tx: &mut sqlx::SqliteConnection,
+        filter: &str,
+        bind_id: i64,
+        now: &str,
+        device: &str,
+    ) -> Result<()> {
+        sqlx::query(&format!(
+            "UPDATE observations SET text = '', tags = '[]', deleted_at = ?, updated_at = ?, modified_by_device = ? \
+             WHERE deleted_at IS NULL AND student_id IN (SELECT id FROM students WHERE {})",
+            filter
+        ))
+        .bind(now)
+        .bind(now)
+        .bind(device)
+        .bind(bind_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(&format!(
+            "UPDATE students SET first_name = '', last_name = '', deleted_at = ?, updated_at = ?, modified_by_device = ? \
+             WHERE deleted_at IS NULL AND {}",
+            filter
+        ))
+        .bind(now)
+        .bind(now)
+        .bind(device)
+        .bind(bind_id)
+        .execute(&mut *tx)
+        .await?;
         Ok(())
     }
 
@@ -634,16 +666,7 @@ impl Database {
 
     pub async fn delete_student(&self, student_id: i64, force_delete: bool) -> Result<()> {
         if force_delete {
-            // Hard delete: remove student and all observations
-            sqlx::query("DELETE FROM observations WHERE student_id = ?")
-                .bind(student_id)
-                .execute(&self.pool)
-                .await?;
-
-            sqlx::query("DELETE FROM students WHERE id = ?")
-                .bind(student_id)
-                .execute(&self.pool)
-                .await?;
+            self.tombstone_student(student_id).await?;
         } else {
             // Soft delete: mark as deleted
             sqlx::query("UPDATE students SET status = 'deleted', updated_at = ?, modified_by_device = ? WHERE id = ?")
@@ -654,6 +677,17 @@ impl Database {
                 .await?;
         }
 
+        Ok(())
+    }
+
+    /// Löscht einen Schüler endgültig als Löschvermerk (Namen leer, Status bleibt) und
+    /// kaskadiert in derselben Transaktion auf seine Beobachtungen.
+    pub async fn tombstone_student(&self, student_id: i64) -> Result<()> {
+        let now = self.now_ts();
+        let device = self.crypto.get_device_id();
+        let mut tx = self.pool.begin().await?;
+        Self::tombstone_students_in(&mut tx, "id = ?", student_id, &now, &device).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -882,13 +916,7 @@ impl Database {
         author_id: i64,
         force_delete: bool,
     ) -> Result<()> {
-        if force_delete {
-            // Hard delete: remove completely
-            sqlx::query("DELETE FROM observations WHERE id = ?")
-                .bind(observation_id)
-                .execute(&self.pool)
-                .await?;
-        } else {
+        if !force_delete {
             // Check if user is the author
             let author_check = sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM observations WHERE id = ? AND author_id = ? AND deleted_at IS NULL",
@@ -903,14 +931,23 @@ impl Database {
                     "Permission denied: You can only delete your own observations"
                 ));
             }
-
-            sqlx::query("DELETE FROM observations WHERE id = ? AND author_id = ?")
-                .bind(observation_id)
-                .bind(author_id)
-                .execute(&self.pool)
-                .await?;
         }
 
+        self.tombstone_observation(observation_id).await
+    }
+
+    /// Löscht eine Beobachtung endgültig als inhaltslosen Löschvermerk.
+    pub async fn tombstone_observation(&self, id: i64) -> Result<()> {
+        let now = self.now_ts();
+        sqlx::query(
+            "UPDATE observations SET text = '', tags = '[]', deleted_at = ?, updated_at = ?, modified_by_device = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(self.crypto.get_device_id())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1081,6 +1118,11 @@ impl Database {
             .fetch_one(&self.pool)
             .await?;
 
+        // Löschvermerke werden nie durch Importe mit Inhalt überschrieben.
+        if existing.deleted_at.is_some() {
+            return Ok(false);
+        }
+
         // Ids are assigned per device (AUTOINCREMENT), so the same id can belong to a
         // different observation created elsewhere. Only merge when origin device and
         // creation time match as well; otherwise keep the local row as before.
@@ -1210,6 +1252,17 @@ impl Database {
 
                         imported_students += 1;
                     } else {
+                        // Löschvermerke werden nie durch Importe mit Inhalt überschrieben.
+                        let tombstoned: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM students WHERE id = ? AND deleted_at IS NOT NULL",
+                        )
+                        .bind(student.id)
+                        .fetch_one(&self.pool)
+                        .await?;
+                        if tombstoned > 0 {
+                            continue;
+                        }
+
                         // Student exists - check if it's deleted and needs reactivation
                         let current_status = sqlx::query_scalar::<_, String>(
                             "SELECT status FROM students WHERE id = ?",
@@ -1484,14 +1537,26 @@ impl Database {
             }
         }
 
-        // Hard delete: remove completely
-        sqlx::query("DELETE FROM categories WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        self.tombstone_category(id).await
+    }
+
+    /// Löscht eine Kategorie endgültig als Löschvermerk. Name und Farben bleiben (kein
+    /// Personenbezug); der partielle Unique-Index gibt den Namen wieder frei.
+    pub async fn tombstone_category(&self, id: i64) -> Result<()> {
+        let now = self.now_ts();
+        sqlx::query(
+            "UPDATE categories SET deleted_at = ?, updated_at = ?, modified_by_device = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(self.crypto.get_device_id())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
+    // Bewusst hartes Löschen: nur lokaler Reset/Testhelfer (keine Tauri-Befehle rufen ihn auf), nichts muss synchronisiert werden.
     pub async fn clear_all_data(&self) -> Result<()> {
         sqlx::query("DELETE FROM observations")
             .execute(&self.pool)
@@ -2075,20 +2140,18 @@ mod tests {
         let observations_after_hard = db.search_observations(None, None, None).await.unwrap();
         assert_eq!(observations_after_hard.len(), 0);
 
-        // Now restore via import - student should be restored as active
+        // Ein Löschvermerk gewinnt: ein alter Import belebt Schüler und Beobachtung nicht wieder
         let result = db.import_full_backup(&backup_data).await.unwrap();
         assert!(result.contains("Successfully imported"));
-
-        // Verify student is restored
-        let students_after_restore = db.get_students().await.unwrap();
-        assert_eq!(students_after_restore.len(), 1);
-        assert_eq!(students_after_restore[0].first_name, "Max");
-        assert_eq!(students_after_restore[0].status, "active");
-
-        // Verify observations are restored
-        let observations_after_restore = db.search_observations(None, None, None).await.unwrap();
-        assert_eq!(observations_after_restore.len(), 1);
-        assert_eq!(observations_after_restore[0].text, "Test observation");
+        assert_eq!(db.get_students().await.unwrap().len(), 0);
+        assert_eq!(db.search_observations(None, None, None).await.unwrap().len(), 0);
+        let leaked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM students WHERE first_name != '' OR last_name != ''",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(leaked, 0);
     }
 
     #[tokio::test]
@@ -2357,6 +2420,81 @@ mod tests {
             .find(|o| o.text == "Imported observation")
             .expect("Imported observation not found");
         assert_eq!(imported_obs.id, 999);
+    }
+
+    #[tokio::test]
+    async fn test_delete_observation_leaves_contentless_tombstone() {
+        let (db, _t) = create_test_db().await;
+        let class = db.create_class("5a".into(), "2023/24".into()).await.unwrap();
+        let st = db.create_student(class.id, "Max".into(), "M".into(), None).await.unwrap();
+        let o = db.create_observation(st.id, 1, "social".into(), "Geheim".into(), vec!["x".into()]).await.unwrap();
+        db.delete_observation(o.id, 1, false).await.unwrap();
+        let row: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT text, tags, deleted_at, modified_by_device FROM observations WHERE id = ?").bind(o.id)
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(row.0, "");
+        assert_eq!(row.1, "[]");
+        assert!(row.2.is_some());
+        assert!(row.3.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_force_delete_student_cascades_tombstones() {
+        let (db, _t) = create_test_db().await;
+        let class = db.create_class("5a".into(), "2023/24".into()).await.unwrap();
+        let st = db.create_student(class.id, "Max".into(), "Mustermann".into(), None).await.unwrap();
+        db.create_observation(st.id, 1, "social".into(), "A".into(), vec!["t".into()]).await.unwrap();
+        db.create_observation(st.id, 1, "social".into(), "B".into(), vec![]).await.unwrap();
+        db.delete_student(st.id, true).await.unwrap();
+        let s: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT first_name, last_name, deleted_at FROM students WHERE id = ?").bind(st.id)
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!((s.0.as_str(), s.1.as_str()), ("", ""));
+        assert!(s.2.is_some());
+        let obs: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT text, tags, deleted_at FROM observations WHERE student_id = ?").bind(st.id)
+            .fetch_all(&db.pool).await.unwrap();
+        assert_eq!(obs.len(), 2);
+        assert!(obs.iter().all(|o| o.0.is_empty() && o.1 == "[]" && o.2.is_some()));
+    }
+
+    #[tokio::test]
+    async fn test_force_delete_class_cascades_tombstones() {
+        let (db, _t) = create_test_db().await;
+        let class = db.create_class("5a".into(), "2023/24".into()).await.unwrap();
+        let st = db.create_student(class.id, "Max".into(), "Mustermann".into(), None).await.unwrap();
+        db.create_observation(st.id, 1, "social".into(), "A".into(), vec![]).await.unwrap();
+        db.delete_class(class.id, true).await.unwrap();
+        let c: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT name, school_year, deleted_at FROM classes WHERE id = ?").bind(class.id)
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(c.0, "");
+        assert_eq!(c.1, "2023/24");
+        assert!(c.2.is_some());
+        let s: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT first_name, last_name, deleted_at FROM students WHERE id = ?").bind(st.id)
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!((s.0.as_str(), s.1.as_str()), ("", ""));
+        assert!(s.2.is_some());
+        let o: (String, Option<String>) = sqlx::query_as(
+            "SELECT text, deleted_at FROM observations WHERE student_id = ?").bind(st.id)
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(o.0, "");
+        assert!(o.1.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_delete_category_tombstone_frees_name() {
+        let (db, _t) = create_test_db().await;
+        let cat = db.create_category("Sozial2".into(), "#111111".into(), "#222222".into(), "#333333".into()).await.unwrap();
+        db.delete_category(cat.id, true).await.unwrap();
+        let row: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT name, color, deleted_at FROM categories WHERE id = ?").bind(cat.id)
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(row.0, "Sozial2");
+        assert_eq!(row.1, "#111111");
+        assert!(row.2.is_some());
+        db.create_category("Sozial2".into(), "#111111".into(), "#222222".into(), "#333333".into()).await.unwrap();
     }
 
     #[tokio::test]
