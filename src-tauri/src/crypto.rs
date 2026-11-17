@@ -76,6 +76,14 @@ impl CryptoManager {
         }
     }
 
+    /// Fester Gerätename ohne Zugriff auf den Geheimnisspeicher (Tests mit mehreren Geräten).
+    #[cfg(test)]
+    pub fn with_device_id(device_id: &str) -> Self {
+        Self {
+            device_id: device_id.to_string(),
+        }
+    }
+
     pub fn get_device_id(&self) -> String {
         self.device_id.clone()
     }

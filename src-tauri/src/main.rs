@@ -9,6 +9,7 @@ mod gdpr;
 mod webdav_sync;
 mod sync_time;
 mod snapshot;
+mod merge;
 mod sync_schema;
 
 #[cfg(test)]

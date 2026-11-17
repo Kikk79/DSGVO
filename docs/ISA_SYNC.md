@@ -17,13 +17,13 @@ Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 
 | ID | Anforderung | Begründung | Status |
 |---|---|---|---|
-| A1 | Global eindeutige IDs (UUID) für alle synchronisierten Datensätze | Jedes Gerät zählt heute eigene Auto-Increment-IDs; Kollisionen führen dazu, dass fremde Datensätze stillschweigend nicht übernommen werden | offen |
+| A1 | Global eindeutige IDs (UUID) für alle synchronisierten Datensätze | Jedes Gerät zählt heute eigene Auto-Increment-IDs; Kollisionen führen dazu, dass fremde Datensätze stillschweigend nicht übernommen werden | umgesetzt (UUID in allen vier Tabellen; Zusammenführen über UUID in `merge.rs`) |
 | A2 | Löschungen synchronisieren (Löschmarker/Tombstones) | Gelöschte Datensätze kommen heute vom anderen Gerät zurück | teilweise (lokal: Löschvermerke mit Kaskade, Inhalte geleert; Sync der Vermerke folgt) |
-| A3 | Import in einer Transaktion | Abgebrochener Import bleibt heute halb angewendet | offen |
-| A4 | Konfliktregel: jüngere Fassung gewinnt, gemessen an V2-Zeit | heute last-writer-wins auf lokaler Uhr (`updated_at`) | teilweise (nur Beobachtungen, lokale Uhr) |
-| A5 | Abhängigkeiten in richtiger Reihenfolge importieren (Klasse → Schüler → Beobachtung; Kategorien vor Beobachtungen) | Fremdschlüssel (`PRAGMA foreign_keys=ON`) lassen Importe sonst scheitern | offen |
+| A3 | Import in einer Transaktion | Abgebrochener Import bleibt heute halb angewendet | umgesetzt (`merge.rs`: `merge_snapshot`/`replace_with_snapshot` je eine Transaktion; Fehler → Rollback, lokale Daten unverändert) |
+| A4 | Konfliktregel: jüngere Fassung gewinnt, gemessen an V2-Zeit | heute last-writer-wins auf lokaler Uhr (`updated_at`) | umgesetzt (`merge.rs`: jüngeres `max(updated_at, deleted_at)` nach Serverzeit gewinnt, Gleichstand → größere `modified_by_device`; Zeitvergleich formatunabhängig) |
+| A5 | Abhängigkeiten in richtiger Reihenfolge importieren (Klasse → Schüler → Beobachtung; Kategorien vor Beobachtungen) | Fremdschlüssel (`PRAGMA foreign_keys=ON`) lassen Importe sonst scheitern | umgesetzt (`merge.rs`: Kategorien → Klassen → Schüler → Beobachtungen; unbekannter Elternverweis → ganze Datei zurückgerollt) |
 | A6 | Zeitpunkt des letzten erfolgreichen Abgleichs dauerhaft speichern | `update_last_sync_timestamp` wird nie aufgerufen; derzeit nur im Speicher des Sync-Managers | teilweise |
-| A7 | Übernommene Fremdänderungen im Audit-Log protokollieren (ohne Inhalt) | heute nur auf dem Gerät, auf dem bearbeitet wurde | offen |
+| A7 | Übernommene Fremdänderungen im Audit-Log protokollieren (ohne Inhalt) | heute nur auf dem Gerät, auf dem bearbeitet wurde | umgesetzt (`merge.rs`: `MergeReport.changes` + `log_merge_audit`: Aktion `sync_merge`, Objekt-Typ, lokale ID, Art – ohne Inhalt) |
 | A8 | Kategorien: aktiv/inaktiv und Reihenfolge als Felder, die mit synchronisiert werden | Backend kann beides heute nicht; Oberfläche lässt es deshalb weg | offen |
 | A9 | Schüler bearbeiten / Klasse wechseln, mit Sync | kein Backend-Befehl vorhanden | offen |
 | A10 | Migration bestehender Datenbanken (vorhandene Integer-IDs → UUID, ohne Datenverlust) | Bestandsdaten bei Lehrkräften | umgesetzt (`sync_schema.rs`: Sicherung `*.vor-sync-v2-*.bak`, abgeleitete UUIDv5, eine Transaktion) |
@@ -41,6 +41,8 @@ Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 | 2026-11-17 | Endgültiges Löschen gewinnt immer gegen Bearbeitungen, auch jüngere; Kaskade auf abhängige Datensätze. |
 | 2026-11-17 | Laptop ist maßgeblich; vorhandene Workstation-Daten sind veraltet und werden beim **ersten** Abgleich durch den Laptop-Stand ersetzt (mit Sicherungskopie), danach normales Zusammenführen. |
 | 2026-11-17 | Pflichtauswahl der Geräterolle Laptop/Desktop beim ersten Start; Desktop wartet beim ersten Abgleich auf einen Laptop-Stand und lädt bis dahin nichts hoch. |
+| 2026-11-17 | Zusammenführen (Sync v2, `merge.rs`): Löschvermerk gewinnt immer; sonst jüngere Fassung nach Serverzeit, Gleichstand → lexikografisch größere `modified_by_device` (ersetzt für Sync v2 die Regel „Gleichstand → lokale Fassung bleibt“). Lokale Kinder eines übernommenen Löschvermerks (Schüler gelöschter Klassen, Beobachtungen gelöschter Schüler) werden ebenfalls inhaltslose Löschvermerke. |
+| 2026-11-17 | Kategorien gleichen Namens mit verschiedener UUID werden zusammengelegt (kleinere UUID, Felder der jüngeren Fassung). Die verdrängte UUID verschwindet lokal **ohne** Löschvermerk: ein Löschvermerk würde auf einem Gerät, das die Zusammenlegung noch nicht kennt, die aktive Kategorie löschen (Löschen gewinnt immer); ohne Vermerk führen beide Geräte nach Austausch in beide Richtungen zum selben Stand. Namenstausch zweier Kategorien wird nicht als Zusammenlegung behandelt. |
 | 2026-11-17 | Bearbeitete Beobachtungen: Import übernimmt die Fassung mit jüngerem `updated_at`; Übernahme nur, wenn `source_device_id` und `created_at` übereinstimmen (Schutz gegen ID-Kollision). Gleichstand → lokale Fassung bleibt. |
 
 ## 4. Offene Fragen

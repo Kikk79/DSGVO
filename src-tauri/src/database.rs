@@ -54,6 +54,36 @@ impl Database {
         Ok(db)
     }
 
+    /// Verbindungspool für Module, die eigene Transaktionen über mehrere Tabellen brauchen
+    /// (Zusammenführen in `merge.rs`).
+    pub(crate) fn pool(&self) -> &Pool<Sqlite> {
+        &self.pool
+    }
+
+    /// Test-Datenbank mit fester Geräte-ID und eigenem Uhrversatz (zwei "Geräte" in einem
+    /// Testprozess). Eine Verbindung, damit Lesen nach Schreiben deterministisch ist.
+    #[cfg(test)]
+    pub(crate) async fn open_for_test(
+        db_path: &Path,
+        device_id: &str,
+        offset_ms: i64,
+    ) -> Result<Self> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite:{}?mode=rwc", db_path.display()))
+            .await?;
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
+        let db = Self {
+            pool,
+            crypto: Arc::new(CryptoManager::with_device_id(device_id)),
+            db_path: db_path.to_path_buf(),
+            clock: Arc::new(SyncClock::new(0)),
+        };
+        db.migrate().await?;
+        db.clock.set_offset_ms(offset_ms);
+        Ok(db)
+    }
+
     /// Aktuelle Zeit nach Serverzeit (lokale Uhr plus gemessener Versatz).
     pub fn now(&self) -> chrono::DateTime<chrono::Utc> {
         self.clock.now()
