@@ -763,6 +763,64 @@ async fn get_observation(
 }
 
 #[tauri::command]
+async fn update_observation(
+    state: tauri::State<'_, AppState>,
+    observation_id: i64,
+    category: String,
+    text: String,
+    tags: Vec<String>,
+) -> Result<Observation, String> {
+    let db = state.db.lock().await;
+
+    // In a real system, you would get the current user ID from session/auth
+    // For now, using author_id = 1 as default
+    let author_id = 1;
+
+    let existing = db
+        .get_observation(observation_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Observation with id {} not found", observation_id))?;
+
+    database::Database::validate_observation_content(&category, &text)
+        .map_err(|e| e.to_string())?;
+
+    // Log the update attempt before personal data is changed. The details name the
+    // changed fields only, so the audit log keeps no copy of the observation content.
+    let mut changed_fields = Vec::new();
+    if existing.category != category {
+        changed_fields.push("category");
+    }
+    if existing.text != text {
+        changed_fields.push("text");
+    }
+    let existing_tags = serde_json::from_str::<Vec<String>>(&existing.tags).ok();
+    if existing_tags.as_ref() != Some(&tags) {
+        changed_fields.push("tags");
+    }
+    let details = serde_json::json!({
+        "student_id": existing.student_id,
+        "changed_fields": changed_fields,
+        "previous_updated_at": existing.updated_at,
+    });
+    state
+        .audit
+        .log_action(
+            "update",
+            "observation",
+            observation_id,
+            author_id,
+            Some(&details.to_string()),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    db.update_observation(observation_id, category, text, tags)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_assessments_comprehensive(
     state: tauri::State<'_, AppState>,
     limit: Option<i64>,
@@ -1111,24 +1169,34 @@ async fn trigger_manual_sync(state: tauri::State<'_, AppState>) -> Result<String
 async fn get_webdav_sync_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let db = state.db.lock().await;
-
-    // Check if configured
-    let credentials = db
-        .get_webdav_credentials()
-        .await
-        .map_err(|e| e.to_string())?;
+    // Die Datenbank-Sperre wird vor dem Sync-Manager wieder freigegeben: Ein laufender
+    // Abgleich hält den Sync-Manager und wartet auf die Datenbank.
+    let (credentials, stored_last_sync) = {
+        let db = state.db.lock().await;
+        let credentials = db
+            .get_webdav_credentials()
+            .await
+            .map_err(|e| e.to_string())?;
+        let stored_last_sync = db
+            .get_last_sync_timestamp()
+            .await
+            .map_err(|e| e.to_string())?;
+        (credentials, stored_last_sync)
+    };
     let is_configured = credentials.is_some();
 
-    // Get last sync timestamp
-    let last_sync = db
-        .get_last_sync_timestamp()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Check if sync manager is active
-    let webdav_sync = state.webdav_sync.lock().await;
-    let is_active = webdav_sync.is_some();
+    // Check if sync manager is active; it records the time of its last successful sync.
+    let (is_active, manager_last_sync) = match state.webdav_sync.try_lock() {
+        Ok(webdav_sync) => match webdav_sync.as_ref() {
+            Some(manager) => (true, manager.get_last_sync().await),
+            None => (false, None),
+        },
+        // Ein Abgleich läuft gerade; der Manager ist also aktiv.
+        Err(_) => (true, None),
+    };
+    let last_sync = manager_last_sync
+        .map(|t| t.to_rfc3339())
+        .or(stored_last_sync);
 
     Ok(serde_json::json!({
         "configured": is_configured,
@@ -1320,6 +1388,7 @@ fn main() {
             get_sync_status,
             create_observation,
             get_observation,
+            update_observation,
             delete_observation,
             get_students,
             get_students_with_stats,

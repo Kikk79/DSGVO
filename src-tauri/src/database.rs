@@ -578,6 +578,7 @@ impl Database {
         text: String,
         tags: Vec<String>,
     ) -> Result<Observation> {
+        Self::validate_observation_content(&category, &text)?;
         let device_id = self.crypto.get_device_id();
         let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
 
@@ -610,6 +611,55 @@ impl Database {
                 .context("Failed to fetch observation")?;
 
         Ok(observation)
+    }
+
+    pub fn validate_observation_content(category: &str, text: &str) -> Result<()> {
+        if category.trim().is_empty() {
+            return Err(anyhow::anyhow!("Observation category must not be empty"));
+        }
+        if text.trim().is_empty() {
+            return Err(anyhow::anyhow!("Observation text must not be empty"));
+        }
+        Ok(())
+    }
+
+    pub async fn update_observation(
+        &self,
+        observation_id: i64,
+        category: String,
+        text: String,
+        tags: Vec<String>,
+    ) -> Result<Observation> {
+        Self::validate_observation_content(&category, &text)?;
+
+        let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
+
+        // student_id, author_id, created_at and source_device_id stay untouched: together
+        // with the id they identify the observation on other devices (see
+        // merge_existing_observation). updated_at is bound as a UTC timestamp, like the
+        // import code does, because it decides which copy wins during sync.
+        let result = sqlx::query(
+            "UPDATE observations SET category = ?, text = ?, tags = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&category)
+        .bind(&text)
+        .bind(&tags_json)
+        .bind(chrono::Utc::now())
+        .bind(observation_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update observation")?;
+
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!(
+                "Observation with id {} not found",
+                observation_id
+            ));
+        }
+
+        self.get_observation(observation_id)
+            .await?
+            .context("Failed to fetch updated observation")
     }
 
     pub async fn search_observations(
@@ -657,8 +707,9 @@ impl Database {
         since: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Observation>> {
         let observations = sqlx::query_as::<_, Observation>(
-            "SELECT * FROM observations WHERE created_at >= ? ORDER BY created_at DESC",
+            "SELECT * FROM observations WHERE created_at >= ? OR updated_at >= ? ORDER BY created_at DESC",
         )
+        .bind(since)
         .bind(since)
         .fetch_all(&self.pool)
         .await
@@ -882,6 +933,8 @@ impl Database {
                     .await?;
 
                     imported_count += 1;
+                } else if self.merge_existing_observation(obs).await? {
+                    imported_count += 1;
                 }
             }
         }
@@ -890,6 +943,40 @@ impl Database {
             "Successfully imported {} observations",
             imported_count
         ))
+    }
+
+    /// Last-write-wins merge of an imported observation whose id already exists locally.
+    /// Returns true if the local row was overwritten with the imported edit.
+    async fn merge_existing_observation(&self, incoming: Observation) -> Result<bool> {
+        let existing = sqlx::query_as::<_, Observation>("SELECT * FROM observations WHERE id = ?")
+            .bind(incoming.id)
+            .fetch_one(&self.pool)
+            .await?;
+
+        // Ids are assigned per device (AUTOINCREMENT), so the same id can belong to a
+        // different observation created elsewhere. Only merge when origin device and
+        // creation time match as well; otherwise keep the local row as before.
+        let same_observation = existing.source_device_id == incoming.source_device_id
+            && existing.created_at == incoming.created_at;
+
+        // Timestamps are compared as parsed values, not as SQL text: the column holds
+        // both CURRENT_TIMESTAMP and RFC 3339 formatted values, which do not sort together.
+        if !same_observation || incoming.updated_at <= existing.updated_at {
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "UPDATE observations SET category = ?, text = ?, tags = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(incoming.category)
+        .bind(incoming.text)
+        .bind(incoming.tags)
+        .bind(incoming.updated_at)
+        .bind(incoming.id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(true)
     }
 
     pub async fn import_full_backup(&self, backup_data: &[u8]) -> Result<String> {
@@ -1044,6 +1131,8 @@ impl Database {
                         .execute(&self.pool)
                         .await?;
 
+                        imported_observations += 1;
+                    } else if self.merge_existing_observation(obs).await? {
                         imported_observations += 1;
                     }
                 }
@@ -2701,5 +2790,399 @@ mod tests {
             "Full export took too long: {:?}",
             full_export_duration
         );
+    }
+
+    // ---- update_observation and sync of edited observations ----
+
+    // The create_* methods return their `RETURNING` row before the INSERT statement has
+    // finished, so an immediate read on another pooled connection can miss the new row.
+    // A single connection keeps the tests below deterministic.
+    async fn create_single_connection_test_db() -> (Database, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_url = format!(
+            "sqlite:{}?mode=rwc",
+            temp_dir.path().join("test.db").display()
+        );
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .unwrap();
+        let crypto = Arc::new(CryptoManager::new().unwrap());
+        let db = Database { pool, crypto };
+        db.migrate().await.unwrap();
+        (db, temp_dir)
+    }
+
+    async fn create_test_observation(db: &Database) -> Observation {
+        let class = db
+            .create_class("5a".to_string(), "2023/24".to_string())
+            .await
+            .unwrap();
+        let student = db
+            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
+            .await
+            .unwrap();
+        db.create_observation(
+            student.id,
+            1,
+            "social".to_string(),
+            "Original observation".to_string(),
+            vec!["original".to_string()],
+        )
+        .await
+        .unwrap()
+    }
+
+    // Same "data" layout as the export_all_data command, which import_full_backup reads
+    async fn export_full_backup(db: &Database) -> Vec<u8> {
+        serde_json::json!({
+            "format": "full_export",
+            "data": {
+                "classes": db.get_classes().await.unwrap(),
+                "students": db.get_all_students_including_deleted().await.unwrap(),
+                "observations": db.search_observations(None, None, None).await.unwrap()
+            }
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    // Two devices holding the same observation: created on A, transferred to B by full backup
+    async fn create_synced_devices() -> ((Database, TempDir), (Database, TempDir), Observation) {
+        let device_a = create_single_connection_test_db().await;
+        let device_b = create_single_connection_test_db().await;
+
+        let observation = create_test_observation(&device_a.0).await;
+        device_b
+            .0
+            .import_full_backup(&export_full_backup(&device_a.0).await)
+            .await
+            .unwrap();
+
+        let on_b = device_b.0.get_observation(observation.id).await.unwrap();
+        assert_eq!(on_b.unwrap().text, "Original observation");
+
+        (device_a, device_b, observation)
+    }
+
+    #[tokio::test]
+    async fn test_update_observation_success() {
+        let (db, _temp_dir) = create_single_connection_test_db().await;
+        let observation = create_test_observation(&db).await;
+
+        let updated = db
+            .update_observation(
+                observation.id,
+                "academic".to_string(),
+                "Edited observation".to_string(),
+                vec!["edited".to_string(), "math".to_string()],
+            )
+            .await
+            .unwrap();
+
+        // Editable fields are changed
+        assert_eq!(updated.id, observation.id);
+        assert_eq!(updated.category, "academic");
+        assert_eq!(updated.text, "Edited observation");
+        assert_eq!(updated.tags, r#"["edited","math"]"#);
+
+        // Identity fields are kept
+        assert_eq!(updated.student_id, observation.student_id);
+        assert_eq!(updated.author_id, observation.author_id);
+        assert_eq!(updated.source_device_id, observation.source_device_id);
+
+        // The returned row is what is stored
+        let stored = db.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(stored.category, "academic");
+        assert_eq!(stored.text, "Edited observation");
+        assert_eq!(stored.tags, r#"["edited","math"]"#);
+        assert_eq!(stored.updated_at, updated.updated_at);
+
+        // No additional row was created
+        let observations = db.search_observations(None, None, None).await.unwrap();
+        assert_eq!(observations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_update_observation_unknown_id() {
+        let (db, _temp_dir) = create_single_connection_test_db().await;
+        let observation = create_test_observation(&db).await;
+
+        let result = db
+            .update_observation(
+                observation.id + 999,
+                "academic".to_string(),
+                "Edited observation".to_string(),
+                vec![],
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+
+        // The existing observation is untouched
+        let stored = db.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(stored.text, "Original observation");
+        assert_eq!(stored.updated_at, observation.updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_update_observation_validation() {
+        let (db, _temp_dir) = create_single_connection_test_db().await;
+        let observation = create_test_observation(&db).await;
+
+        // Empty and whitespace-only text is rejected
+        for text in ["", "   \n\t"] {
+            let result = db
+                .update_observation(
+                    observation.id,
+                    "academic".to_string(),
+                    text.to_string(),
+                    vec![],
+                )
+                .await;
+            assert!(result.unwrap_err().to_string().contains("text"));
+        }
+
+        // Empty category is rejected
+        let result = db
+            .update_observation(
+                observation.id,
+                " ".to_string(),
+                "Edited observation".to_string(),
+                vec![],
+            )
+            .await;
+        assert!(result.unwrap_err().to_string().contains("category"));
+
+        // Rejected updates change nothing
+        let stored = db.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(stored.category, "social");
+        assert_eq!(stored.text, "Original observation");
+        assert_eq!(stored.tags, r#"["original"]"#);
+        assert_eq!(stored.updated_at, observation.updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_update_observation_changes_updated_at_only() {
+        let (db, _temp_dir) = create_single_connection_test_db().await;
+        let observation = create_test_observation(&db).await;
+
+        let updated = db
+            .update_observation(
+                observation.id,
+                "social".to_string(),
+                "Edited observation".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.created_at, observation.created_at);
+        assert!(updated.updated_at > observation.updated_at);
+
+        let stored = db.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(stored.created_at, observation.created_at);
+        assert_eq!(stored.updated_at, updated.updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_changeset_export_selects_observation_by_edit_time() {
+        let (db, _temp_dir) = create_single_connection_test_db().await;
+        let observation = create_test_observation(&db).await;
+
+        // Simulate an observation that was created and last changed 60 days ago
+        let sixty_days_ago = chrono::Utc::now() - chrono::Duration::days(60);
+        sqlx::query("UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?")
+            .bind(sixty_days_ago)
+            .bind(sixty_days_ago)
+            .bind(observation.id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        // Outside of the 30 day window while it is unchanged
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        assert!(db.get_observations_since(cutoff).await.unwrap().is_empty());
+
+        db.update_observation(
+            observation.id,
+            "social".to_string(),
+            "Edited today".to_string(),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        // The edit brings it back into the window
+        let recent = db.get_observations_since(cutoff).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].text, "Edited today");
+        assert_eq!(recent[0].created_at, sixty_days_ago);
+
+        // ... and therefore into the exported changeset
+        let changeset: serde_json::Value =
+            serde_json::from_slice(&db.create_changeset_file(30).await.unwrap()).unwrap();
+        let exported = changeset["data"]["changes"]["observations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0]["text"], "Edited today");
+    }
+
+    #[tokio::test]
+    async fn test_sync_changeset_edit_reaches_other_device() {
+        let ((db_a, _dir_a), (db_b, _dir_b), observation) = create_synced_devices().await;
+
+        // Edit on device A
+        let edited = db_a
+            .update_observation(
+                observation.id,
+                "academic".to_string(),
+                "Edited on device A".to_string(),
+                vec!["edited".to_string()],
+            )
+            .await
+            .unwrap();
+
+        // Device B imports the changeset of device A
+        let changeset = db_a.create_changeset_file(30).await.unwrap();
+        let result = db_b.apply_changeset_file(&changeset).await.unwrap();
+        assert_eq!(result, "Successfully imported 1 observations");
+
+        let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(on_b.category, "academic");
+        assert_eq!(on_b.text, "Edited on device A");
+        assert_eq!(on_b.tags, r#"["edited"]"#);
+        assert_eq!(on_b.updated_at, edited.updated_at);
+        assert_eq!(on_b.created_at, observation.created_at);
+        assert_eq!(on_b.source_device_id, observation.source_device_id);
+
+        // Importing the same changeset again (WebDAV sync re-reads every file) is a no-op
+        let result = db_b.apply_changeset_file(&changeset).await.unwrap();
+        assert_eq!(result, "Successfully imported 0 observations");
+        let observations = db_b.search_observations(None, None, None).await.unwrap();
+        assert_eq!(observations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sync_changeset_stale_copy_does_not_overwrite_newer_edit() {
+        let ((db_a, _dir_a), (db_b, _dir_b), observation) = create_synced_devices().await;
+
+        // Device A exports the original version, edits, and exports again
+        let original_changeset = db_a.create_changeset_file(30).await.unwrap();
+        db_a.update_observation(
+            observation.id,
+            "social".to_string(),
+            "Older edit on device A".to_string(),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let older_changeset = db_a.create_changeset_file(30).await.unwrap();
+
+        // Device B edits afterwards
+        let newer = db_b
+            .update_observation(
+                observation.id,
+                "academic".to_string(),
+                "Newer edit on device B".to_string(),
+                vec!["newer".to_string()],
+            )
+            .await
+            .unwrap();
+
+        // Neither older copy may replace the newer edit on device B
+        for changeset in [&original_changeset, &older_changeset] {
+            let result = db_b.apply_changeset_file(changeset).await.unwrap();
+            assert_eq!(result, "Successfully imported 0 observations");
+        }
+        let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(on_b.category, "academic");
+        assert_eq!(on_b.text, "Newer edit on device B");
+        assert_eq!(on_b.tags, r#"["newer"]"#);
+        assert_eq!(on_b.updated_at, newer.updated_at);
+
+        // The newer edit wins on device A as well
+        let newer_changeset = db_b.create_changeset_file(30).await.unwrap();
+        let result = db_a.apply_changeset_file(&newer_changeset).await.unwrap();
+        assert_eq!(result, "Successfully imported 1 observations");
+        let on_a = db_a.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(on_a.text, "Newer edit on device B");
+        assert_eq!(on_a.updated_at, newer.updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_sync_full_backup_merges_edits_by_updated_at() {
+        let ((db_a, _dir_a), (db_b, _dir_b), observation) = create_synced_devices().await;
+
+        // Edit on device A arrives on device B through a full backup
+        let edited = db_a
+            .update_observation(
+                observation.id,
+                "academic".to_string(),
+                "Edited on device A".to_string(),
+                vec!["edited".to_string()],
+            )
+            .await
+            .unwrap();
+        let backup_a = export_full_backup(&db_a).await;
+        let result = db_b.import_full_backup(&backup_a).await.unwrap();
+        assert!(result.contains("1 observations"));
+
+        let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(on_b.category, "academic");
+        assert_eq!(on_b.text, "Edited on device A");
+        assert_eq!(on_b.tags, r#"["edited"]"#);
+        assert_eq!(on_b.updated_at, edited.updated_at);
+
+        // A newer edit on device B is not overwritten by the older backup of device A
+        let newer = db_b
+            .update_observation(
+                observation.id,
+                "social".to_string(),
+                "Newer edit on device B".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let result = db_b.import_full_backup(&backup_a).await.unwrap();
+        assert!(result.contains("0 observations"));
+
+        let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(on_b.text, "Newer edit on device B");
+        assert_eq!(on_b.updated_at, newer.updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_sync_same_id_of_different_observation_is_not_overwritten() {
+        let (db, _temp_dir) = create_single_connection_test_db().await;
+        let local = create_test_observation(&db).await;
+        let later = chrono::Utc::now() + chrono::Duration::hours(1);
+
+        // Another device assigned the same id to an observation of its own
+        let mut other_device = serde_json::to_value(&local).unwrap();
+        other_device["source_device_id"] = serde_json::json!("other-device");
+        other_device["text"] = serde_json::json!("Observation of another device");
+        other_device["updated_at"] = serde_json::json!(later);
+
+        // Same device and id, but created at another time (e.g. a different database file)
+        let mut other_creation = serde_json::to_value(&local).unwrap();
+        other_creation["created_at"] =
+            serde_json::json!(local.created_at - chrono::Duration::days(1));
+        other_creation["text"] = serde_json::json!("Observation of another database");
+        other_creation["updated_at"] = serde_json::json!(later);
+
+        let backup = serde_json::json!({
+            "data": { "observations": [other_device, other_creation] }
+        })
+        .to_string();
+        let result = db.import_full_backup(backup.as_bytes()).await.unwrap();
+        assert!(result.contains("0 observations"));
+
+        let stored = db.get_observation(local.id).await.unwrap().unwrap();
+        assert_eq!(stored.text, "Original observation");
+        assert_eq!(stored.updated_at, local.updated_at);
     }
 }
