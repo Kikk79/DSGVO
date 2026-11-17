@@ -170,8 +170,9 @@ dürfen weg. Maßgeblich ist der Laptop.
 - Schutz des Laptops: Nichts löscht lokale Daten ohne diese ausdrückliche Wahl. Empfohlene
   Reihenfolge bei der Einführung: **zuerst den Laptop aktualisieren und abgleichen**, dann die
   Workstation. In der Anleitung und im Release-Hinweis festhalten.
-- Dieselbe Aktion „Stand vom Server übernehmen“ gibt es auch später in Einstellungen →
-  Synchronisation (mit Sicherungskopie und Bestätigung).
+- Das Ersetzen gibt es **nur beim ersten Abgleich** eines Geräts mit diesem WebDAV-Ordner
+  (Entscheidung Auftraggeber). Danach wird immer normal pro Datensatz zusammengeführt;
+  eine spätere Aktion „Stand vom Server übernehmen“ gibt es nicht.
 
 ### 5.9 Datei-Austausch und Sicherungen
 - „Austausch per Datei“ (Einstellungen → Synchronisation) nutzt dasselbe Snapshot-Format und
