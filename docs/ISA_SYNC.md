@@ -11,7 +11,7 @@ Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 | ID | Vorgabe | Status |
 |---|---|---|
 | V1 | **Alle Daten werden übertragen:** Klassen, Schüler, Kategorien, Beobachtungen und alle weiteren fachlichen Daten. Ein neues Gerät ist nach dem ersten Abgleich vollständig, ohne Backup-Umweg. | offen |
-| V2 | **Gemeinsame Zeitbasis über einen Zeitserver:** Die App holt die Uhrzeit von einem Zeitserver (NTP) und nutzt diese Zeit für alle Zeitstempel, die beim Abgleich entscheiden. Die lokale Rechneruhr ist dafür nicht maßgeblich. | offen |
+| V2 | **Gemeinsame Zeitbasis:** Alle Geräte nutzen dieselbe Zeit für alle Zeitstempel, die beim Abgleich entscheiden; die lokale Rechneruhr ist nicht maßgeblich. Quelle: Uhrzeit des WebDAV-Servers (HTTP-`Date`), Entscheidung 2026-11-17 („egal woher, Hauptsache synchron“). | offen |
 
 ## 2. Weitere Anforderungen (aus Analyse, umzusetzen)
 
@@ -36,13 +36,15 @@ Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 | Datum | Entscheidung |
 |---|---|
 | 2026-11-17 | V1 und V2 vom Auftraggeber festgelegt. |
+| 2026-11-17 | Aufbau: jedes Gerät legt genau eine Datei mit seinem Gesamtstand ab, Zusammenführen pro Datensatz (Design: `docs/superpowers/specs/2026-11-17-sync-redesign-design.md`). |
+| 2026-11-17 | Zeitquelle: Uhrzeit des WebDAV-Servers, kein NTP. |
+| 2026-11-17 | Endgültiges Löschen gewinnt immer gegen Bearbeitungen, auch jüngere; Kaskade auf abhängige Datensätze. |
+| 2026-11-17 | Laptop ist maßgeblich; vorhandene Workstation-Daten sind veraltet und dürfen beim ersten Abgleich ersetzt werden (nur auf ausdrückliche Wahl, mit Sicherungskopie). |
 | 2026-11-17 | Bearbeitete Beobachtungen: Import übernimmt die Fassung mit jüngerem `updated_at`; Übernahme nur, wenn `source_device_id` und `created_at` übereinstimmen (Schutz gegen ID-Kollision). Gleichstand → lokale Fassung bleibt. |
 
 ## 4. Offene Fragen
 
-- V2: Welcher Zeitserver (z. B. `pool.ntp.org`, PTB `ptbtime1.ptb.de`, Schulserver)? Verhalten ohne Netz: lokale Uhr plus zuletzt gemessene Abweichung verwenden und Zeitstempel als „unsicher“ markieren?
-- V1: Werden auch Audit-Log und Gerätekonfiguration übertragen, oder nur fachliche Daten?
-- Zeitraum: Heute werden nur Beobachtungen der letzten 30 Tage übertragen. Mit V1 Vollabgleich beim ersten Mal, danach nur Änderungen?
+- Keine (Stand 2026-11-17). Abgleich-Umfang: nur fachliche Daten, Audit-Log und Gerätekonfiguration nicht.
 
 ## 5. Bekannter Ist-Zustand (vor Umbau)
 
