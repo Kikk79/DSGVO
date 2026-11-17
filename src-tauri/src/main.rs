@@ -7,6 +7,7 @@ mod database;
 mod audit;
 mod gdpr;
 mod webdav_sync;
+mod sync_time;
 
 #[cfg(test)]
 mod tests;
