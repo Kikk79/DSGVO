@@ -26,7 +26,7 @@ Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 | A7 | Übernommene Fremdänderungen im Audit-Log protokollieren (ohne Inhalt) | heute nur auf dem Gerät, auf dem bearbeitet wurde | offen |
 | A8 | Kategorien: aktiv/inaktiv und Reihenfolge als Felder, die mit synchronisiert werden | Backend kann beides heute nicht; Oberfläche lässt es deshalb weg | offen |
 | A9 | Schüler bearbeiten / Klasse wechseln, mit Sync | kein Backend-Befehl vorhanden | offen |
-| A10 | Migration bestehender Datenbanken (vorhandene Integer-IDs → UUID, ohne Datenverlust) | Bestandsdaten bei Lehrkräften | offen |
+| A10 | Migration bestehender Datenbanken (vorhandene Integer-IDs → UUID, ohne Datenverlust) | Bestandsdaten bei Lehrkräften | umgesetzt (`sync_schema.rs`: Sicherung `*.vor-sync-v2-*.bak`, abgeleitete UUIDv5, eine Transaktion) |
 | A11 | Aufräumen alter Änderungsdateien auf dem Server | Dateien werden heute nie gelöscht | offen |
 | A12 | Datenschutz: Server-Dateien enthalten Klartext; Hinweis in der Oberfläche aktuell halten, Verschlüsselung später prüfen | Verschlüsselung ist ausgebaut (ENCRYPTION_DISABLED.md) | offen |
 | A13 | WebDAV-Passwort sicher ablegen (heute nur leicht verschleiert in der DB) | Datenschutz | offen |

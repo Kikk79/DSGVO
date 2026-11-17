@@ -5,12 +5,19 @@ use crate::{
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
-use std::path::Path;
+use crate::sync_time::SyncClock;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub struct Database {
     pool: Pool<Sqlite>,
     crypto: Arc<CryptoManager>,
+    /// Pfad der Datenbankdatei (für Sicherungskopien neben der DB).
+    #[allow(dead_code)] // genutzt ab Task 3/9 (Sync v2)
+    db_path: PathBuf,
+    /// Uhr mit Versatz zur Serverzeit; Versatz aus `sync_config.clock_offset_ms`.
+    #[allow(dead_code)] // genutzt ab Task 3 (Sync v2)
+    clock: Arc<SyncClock>,
 }
 
 impl Database {
@@ -37,7 +44,12 @@ impl Database {
 
         sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
 
-        let db = Self { pool, crypto };
+        let db = Self {
+            pool,
+            crypto,
+            db_path: db_path.as_ref().to_path_buf(),
+            clock: Arc::new(SyncClock::new(0)),
+        };
         db.migrate().await?;
         Ok(db)
     }
@@ -170,8 +182,30 @@ impl Database {
         // Migrate existing tables to add source_device_id columns if they don't exist
         self.add_missing_columns().await?;
 
+        // Sync v2: UUIDs, Löschvermerke, Sicherungskopie (A10). Vor dem Seeding, damit eine
+        // neue, leere DB keine Sicherung bekommt.
+        match crate::sync_schema::migrate_to_v2(&self.pool, &self.db_path).await? {
+            crate::sync_schema::MigrationOutcome::AlreadyCurrent => {}
+            crate::sync_schema::MigrationOutcome::Migrated { backup_path } => {
+                println!(
+                    "Datenbank auf Sync-Schema v2 umgestellt (Sicherung: {})",
+                    backup_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "keine, DB war leer".to_string())
+                );
+            }
+        }
+
         // Seed default categories if none exist
         self.seed_default_categories().await?;
+
+        // Gespeicherten Versatz zur Serverzeit laden (noch nie gemessen: 0)
+        let offset_ms: Option<i64> =
+            sqlx::query_scalar("SELECT clock_offset_ms FROM sync_config WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        self.clock.set_offset_ms(offset_ms.unwrap_or(0));
 
         Ok(())
     }
@@ -1186,8 +1220,8 @@ impl Database {
         for (name, color, bg_color, text_color, sort_order) in default_categories {
             sqlx::query(
                 r#"
-                INSERT INTO categories (name, color, background_color, text_color, is_active, sort_order, source_device_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO categories (name, color, background_color, text_color, is_active, sort_order, source_device_id, uuid, modified_by_device)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#
             )
             .bind(name)
@@ -1196,6 +1230,8 @@ impl Database {
             .bind(text_color)
             .bind(true)
             .bind(sort_order)
+            .bind(&device_id)
+            .bind(uuid::Uuid::new_v4().to_string())
             .bind(&device_id)
             .execute(&self.pool)
             .await?;
@@ -1484,7 +1520,8 @@ impl Database {
         }
 
         let config: Option<SyncConfig> = sqlx::query_as(
-            "SELECT webdav_url, webdav_username, webdav_password_encrypted FROM sync_config WHERE id = 1",
+            // `webdav_url = ''`: Platzhalterzeile aus der Umstellung auf Sync v2, keine Zugangsdaten
+            "SELECT webdav_url, webdav_username, webdav_password_encrypted FROM sync_config WHERE id = 1 AND webdav_url <> ''",
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -2809,7 +2846,12 @@ mod tests {
             .await
             .unwrap();
         let crypto = Arc::new(CryptoManager::new().unwrap());
-        let db = Database { pool, crypto };
+        let db = Database {
+            pool,
+            crypto,
+            db_path: temp_dir.path().join("test.db"),
+            clock: Arc::new(SyncClock::new(0)),
+        };
         db.migrate().await.unwrap();
         (db, temp_dir)
     }
@@ -3184,5 +3226,561 @@ mod tests {
         let stored = db.get_observation(local.id).await.unwrap().unwrap();
         assert_eq!(stored.text, "Original observation");
         assert_eq!(stored.updated_at, local.updated_at);
+    }
+
+    // ============================================
+    // Sync v2: Schema-Umstellung (Task 2, A10)
+    // ============================================
+    mod sync_v2_migration {
+        use super::*;
+        use crate::sync_schema::{self, derived_uuid, MigrationOutcome};
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        const SYNCED_TABLES: [&str; 4] = ["classes", "students", "categories", "observations"];
+
+        /// Kopie der Schema-Texte vor Sync v2 (inkl. `categories.name UNIQUE`).
+        const LEGACY_SCHEMA: &[&str] = &[
+            r#"CREATE TABLE classes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                school_year TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_device_id TEXT NOT NULL DEFAULT ''
+            )"#,
+            r#"CREATE TABLE students (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                class_id INTEGER NOT NULL,
+                first_name TEXT NOT NULL,
+                last_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_device_id TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (class_id) REFERENCES classes (id)
+            )"#,
+            r#"CREATE TABLE categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                color TEXT NOT NULL DEFAULT '#3B82F6',
+                background_color TEXT NOT NULL DEFAULT '#EBF8FF',
+                text_color TEXT NOT NULL DEFAULT '#1E3A8A',
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_device_id TEXT NOT NULL DEFAULT ''
+            )"#,
+            r#"CREATE TABLE observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                author_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                text TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '[]',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_device_id TEXT NOT NULL,
+                FOREIGN KEY (student_id) REFERENCES students (id)
+            )"#,
+            r#"CREATE TABLE attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id INTEGER NOT NULL,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                file_data BLOB NOT NULL,
+                file_hash TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (observation_id) REFERENCES observations (id)
+            )"#,
+            r#"CREATE TABLE sync_state (
+                peer_id TEXT PRIMARY KEY,
+                last_seq INTEGER DEFAULT 0,
+                last_pull DATETIME,
+                last_push DATETIME,
+                changeset_hash TEXT
+            )"#,
+            r#"CREATE TABLE sync_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                webdav_url TEXT NOT NULL,
+                webdav_username TEXT NOT NULL,
+                webdav_password_encrypted BLOB NOT NULL,
+                auto_sync_enabled BOOLEAN DEFAULT 1,
+                sync_interval_seconds INTEGER DEFAULT 180,
+                last_sync_timestamp DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )"#,
+            "CREATE INDEX idx_observations_student ON observations(student_id)",
+            "CREATE INDEX idx_observations_created ON observations(created_at)",
+        ];
+
+        /// Daten: 2 Klassen, 3 Schüler (einer `deleted`), 6 Kategorien, 5 Beobachtungen.
+        /// Zeitstempel gemischt: `CURRENT_TIMESTAMP`-Format und RFC 3339.
+        const LEGACY_DATA: &[&str] = &[
+            r#"INSERT INTO classes VALUES
+                (1, '5a', '2025/26', '2025-08-01 08:00:00', '2025-08-01 08:00:00', 'laptop-A'),
+                (2, '6b', '2025/26', '2025-08-02T09:15:30.123+00:00', '2025-09-01T10:00:00Z', 'laptop-A')"#,
+            r#"INSERT INTO students VALUES
+                (1, 1, 'Anna', 'Müller', 'active', '2025-08-03 10:00:00', '2025-08-03 10:00:00', 'laptop-A'),
+                (2, 1, 'Ben', 'O''Brien', 'deleted', '2025-08-03T10:05:00.000Z', '2025-10-01 12:00:00', 'laptop-A'),
+                (3, 2, 'Çelik', 'Zoë', 'active', '2025-08-04 11:11:11', '2025-08-04T11:11:11.500+00:00', 'desktop-B')"#,
+            r#"INSERT INTO categories VALUES
+                (1, 'Sozial', '#10B981', '#D1FAE5', '#065F46', 1, 1, '2025-08-01 07:00:00', '2025-08-01 07:00:00', 'laptop-A'),
+                (2, 'Fachlich', '#3B82F6', '#DBEAFE', '#1E3A8A', 1, 2, '2025-08-01 07:00:00', '2025-08-01 07:00:00', 'laptop-A'),
+                (3, 'Verhalten', '#F59E0B', '#FEF3C7', '#92400E', 1, 3, '2025-08-01 07:00:00', '2025-08-01 07:00:00', 'laptop-A'),
+                (4, 'Förderung', '#8B5CF6', '#EDE9FE', '#5B21B6', 1, 4, '2025-08-01 07:00:00', '2025-08-01 07:00:00', 'laptop-A'),
+                (5, 'Sonstiges', '#6B7280', '#F3F4F6', '#374151', 0, 5, '2025-08-01 07:00:00', '2025-08-01 07:00:00', 'laptop-A'),
+                (7, 'Elterngespräch', '#EF4444', '#FEE2E2', '#7F1D1D', 1, 6, '2025-09-10T08:30:00.250Z', '2025-09-10T08:30:00.250Z', 'desktop-B')"#,
+            // Simuliert endgültig gelöschte Kategorien mit höheren IDs (AUTOINCREMENT-Zähler > max(id)).
+            "UPDATE sqlite_sequence SET seq = 9 WHERE name = 'categories'",
+            r#"INSERT INTO observations VALUES
+                (1, 1, 1, 'Sozial', 'Hilft anderen „gern“ – sehr kooperativ.', '["team"]', '2025-09-01 08:00:00', '2025-09-01 08:00:00', 'laptop-A'),
+                (2, 1, 1, 'Fachlich', 'Rechnet sicher; Text mit '' Apostroph', '[]', '2025-09-02T09:00:00.000Z', '2025-09-02T09:30:00.000Z', 'laptop-A'),
+                (3, 2, 1, 'Verhalten', 'Störung im Unterricht', '["a","b"]', '2025-09-03 10:00:00.123', '2025-09-03 10:00:00.123', 'laptop-A'),
+                (4, 3, 1, 'Umbenannt-alt', 'Kategorie existiert nicht mehr', '[]', '2025-09-04T10:00:00+02:00', '2025-09-04T10:00:00+02:00', 'desktop-B'),
+                (5, 3, 1, 'Elterngespräch', 'Mehrzeilig
+zweite Zeile', '[]', '2025-09-05 12:00:00', '2025-09-05T12:00:00Z', 'desktop-B')"#,
+            r#"INSERT INTO attachments VALUES
+                (1, 1, 'foto.jpg', 'image/jpeg', X'FFD8FFE000104A464946', 'abc123', '2025-09-01 08:00:01')"#,
+            r#"INSERT INTO sync_state VALUES ('peer-1', 7, '2025-10-01 10:00:00', NULL, 'hash')"#,
+            r#"INSERT INTO sync_config (id, webdav_url, webdav_username, webdav_password_encrypted, auto_sync_enabled, sync_interval_seconds, last_sync_timestamp, created_at, updated_at)
+                VALUES (1, 'https://dav.example.org/remote.php/dav/files/lehrer/', 'lehrer', X'000102030405060708090A0B0C0D0E0F', 1, 180, '2025-11-01 07:00:00', '2025-08-01 07:00:00', '2025-08-01 07:00:00')"#,
+        ];
+
+        async fn open_raw(path: &Path) -> Pool<Sqlite> {
+            let opts = SqliteConnectOptions::from_str(&format!("sqlite:{}", path.display()))
+                .unwrap()
+                .create_if_missing(true)
+                .foreign_keys(false);
+            SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap()
+        }
+
+        async fn create_legacy_db(path: &Path) {
+            let pool = open_raw(path).await;
+            for sql in LEGACY_SCHEMA.iter().chain(LEGACY_DATA.iter()) {
+                sqlx::query(sql).execute(&pool).await.unwrap();
+            }
+            pool.close().await;
+        }
+
+        async fn columns(pool: &Pool<Sqlite>, table: &str) -> Vec<String> {
+            sqlx::query_scalar::<_, String>(&format!(
+                "SELECT name FROM pragma_table_info('{}') ORDER BY cid",
+                table
+            ))
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        }
+
+        /// Exakter Inhalt (inkl. Speichertyp via `quote()`) der angegebenen Spalten.
+        async fn dump(pool: &Pool<Sqlite>, table: &str, cols: &[String]) -> Vec<String> {
+            let expr = cols
+                .iter()
+                .map(|c| format!("quote(\"{}\")", c))
+                .collect::<Vec<_>>()
+                .join(" || char(31) || ");
+            let order = if table == "sync_state" { "peer_id" } else { "id" };
+            sqlx::query_scalar::<_, String>(&format!(
+                "SELECT {} FROM {} ORDER BY {}",
+                expr, table, order
+            ))
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        }
+
+        const ALL_LEGACY_TABLES: [&str; 7] = [
+            "classes",
+            "students",
+            "categories",
+            "observations",
+            "attachments",
+            "sync_state",
+            "sync_config",
+        ];
+
+        async fn snapshot_legacy(path: &Path) -> Vec<(String, Vec<String>, Vec<String>)> {
+            let pool = open_raw(path).await;
+            let mut out = Vec::new();
+            for t in ALL_LEGACY_TABLES {
+                let cols = columns(&pool, t).await;
+                let rows = dump(&pool, t, &cols).await;
+                out.push((t.to_string(), cols, rows));
+            }
+            pool.close().await;
+            out
+        }
+
+        fn backups_in(dir: &Path) -> Vec<PathBuf> {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    let n = p.file_name().unwrap().to_string_lossy().to_string();
+                    n.contains(".vor-sync-v2-") && n.ends_with(".bak")
+                })
+                .collect()
+        }
+
+        async fn open_db(path: &Path) -> Database {
+            let crypto = Arc::new(CryptoManager::new().unwrap());
+            Database::new(path, crypto).await.unwrap()
+        }
+
+        async fn legacy_fixture() -> (TempDir, PathBuf) {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("observations.db");
+            create_legacy_db(&path).await;
+            (dir, path)
+        }
+
+        async fn uuids(pool: &Pool<Sqlite>, table: &str) -> Vec<(i64, Option<String>)> {
+            sqlx::query_as::<_, (i64, Option<String>)>(&format!(
+                "SELECT id, uuid FROM {} ORDER BY id",
+                table
+            ))
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn test_migration_preserves_all_rows() {
+            let (_dir, path) = legacy_fixture().await;
+            let before = snapshot_legacy(&path).await;
+            let expected_counts = [2usize, 3, 6, 5, 1, 1, 1];
+            for ((t, _, rows), n) in before.iter().zip(expected_counts) {
+                assert_eq!(rows.len(), n, "Fixture {}", t);
+            }
+
+            let db = open_db(&path).await;
+            for (t, cols, rows) in &before {
+                let after = dump(&db.pool, t, cols).await;
+                assert_eq!(&after, rows, "Inhalt von {} verändert", t);
+            }
+
+            // AUTOINCREMENT-Zähler der neu aufgebauten Tabelle bleibt erhalten (keine ID-Wiederverwendung)
+            let seq: i64 =
+                sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name = 'categories'")
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            assert!(seq >= 9, "sqlite_sequence für categories: {}", seq);
+
+            // Bestehende Lesepfade (SELECT * + FromRow) funktionieren mit den Zusatzspalten
+            assert_eq!(db.get_classes().await.unwrap().len(), 2);
+            assert_eq!(db.get_all_students_including_deleted().await.unwrap().len(), 3);
+            assert_eq!(db.get_categories().await.unwrap().len(), 5); // nur aktive
+            assert_eq!(db.get_observation(5).await.unwrap().unwrap().text, "Mehrzeilig\nzweite Zeile");
+
+            // Kein Seeding in eine bestehende DB
+            let cat_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM categories")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(cat_count, 6);
+        }
+
+        #[tokio::test]
+        async fn test_migration_assigns_unique_uuids() {
+            let (_dir, path) = legacy_fixture().await;
+            let db = open_db(&path).await;
+            for t in SYNCED_TABLES {
+                let rows = uuids(&db.pool, t).await;
+                assert!(!rows.is_empty());
+                let mut seen = std::collections::HashSet::new();
+                for (id, u) in &rows {
+                    let u = u.clone().unwrap_or_default();
+                    assert!(!u.is_empty(), "{}#{} ohne UUID", t, id);
+                    assert!(uuid::Uuid::parse_str(&u).is_ok(), "{}#{} UUID ungültig: {}", t, id, u);
+                    assert!(seen.insert(u), "{}#{} UUID doppelt", t, id);
+                }
+                // modified_by_device = source_device_id
+                let mismatched: i64 = sqlx::query_scalar(&format!(
+                    "SELECT COUNT(*) FROM {} WHERE modified_by_device <> source_device_id OR deleted_at IS NOT NULL",
+                    t
+                ))
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+                assert_eq!(mismatched, 0, "{}", t);
+                // Eindeutiger Index auf uuid existiert
+                let idx: i64 = sqlx::query_scalar(&format!(
+                    "SELECT COUNT(*) FROM pragma_index_list('{}') l WHERE l.\"unique\" = 1 AND EXISTS (SELECT 1 FROM pragma_index_info(l.name) i WHERE i.name = 'uuid')",
+                    t
+                ))
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+                assert_eq!(idx, 1, "UNIQUE-Index auf {}.uuid", t);
+            }
+            // Erwartete abgeleitete UUID für eine Beispielzeile
+            let obs = uuids(&db.pool, "observations").await;
+            assert_eq!(
+                obs[0].1.as_deref().unwrap(),
+                derived_uuid("observations", "laptop-A", 1, "2025-09-01 08:00:00")
+            );
+        }
+
+        #[tokio::test]
+        async fn test_migration_uuid_is_deterministic() {
+            let (dir, path_a) = legacy_fixture().await;
+            let path_b = dir.path().join("kopie.db");
+            std::fs::copy(&path_a, &path_b).unwrap();
+
+            let db_a = open_db(&path_a).await;
+            let db_b = open_db(&path_b).await; // anderes Gerät (andere CryptoManager-Geräte-ID)
+            for t in SYNCED_TABLES {
+                assert_eq!(uuids(&db_a.pool, t).await, uuids(&db_b.pool, t).await, "{}", t);
+            }
+        }
+
+        #[tokio::test]
+        async fn test_migration_handles_mixed_timestamp_formats() {
+            // Beide Formate ergeben dieselbe UUID
+            let a = derived_uuid("observations", "laptop-A", 3, "2025-09-03 10:00:00");
+            let b = derived_uuid("observations", "laptop-A", 3, "2025-09-03T10:00:00Z");
+            let c = derived_uuid("observations", "laptop-A", 3, "2025-09-03T10:00:00.000+00:00");
+            let d = derived_uuid("observations", "laptop-A", 3, "2025-09-03T12:00:00+02:00");
+            assert_eq!(a, b);
+            assert_eq!(a, c);
+            assert_eq!(a, d);
+
+            // Gerät B hat dieselbe Zeile im anderen Format gespeichert (Kopie per altem Abgleich)
+            let (dir, path_a) = legacy_fixture().await;
+            let path_b = dir.path().join("geraet-b.db");
+            std::fs::copy(&path_a, &path_b).unwrap();
+            {
+                let raw = open_raw(&path_b).await;
+                sqlx::query("UPDATE observations SET created_at = '2025-09-01T08:00:00.000Z' WHERE id = 1")
+                    .execute(&raw)
+                    .await
+                    .unwrap();
+                sqlx::query("UPDATE classes SET created_at = '2025-08-02 09:15:30.123' WHERE id = 2")
+                    .execute(&raw)
+                    .await
+                    .unwrap();
+                raw.close().await;
+            }
+            let before_a = snapshot_legacy(&path_a).await;
+
+            let db_a = open_db(&path_a).await;
+            let db_b = open_db(&path_b).await;
+            for t in SYNCED_TABLES {
+                assert_eq!(uuids(&db_a.pool, t).await, uuids(&db_b.pool, t).await, "{}", t);
+            }
+            // Zeitstempel unverändert (kein Umformatieren)
+            for (t, cols, rows) in &before_a {
+                assert_eq!(&dump(&db_a.pool, t, cols).await, rows, "{}", t);
+            }
+        }
+
+        #[tokio::test]
+        async fn test_migration_writes_backup_before_change() {
+            let (dir, path) = legacy_fixture().await;
+            let _db = open_db(&path).await;
+
+            let backups = backups_in(dir.path());
+            assert_eq!(backups.len(), 1, "{:?}", backups);
+            let name = backups[0].file_name().unwrap().to_string_lossy().to_string();
+            assert!(name.starts_with("observations.db.vor-sync-v2-"), "{}", name);
+
+            let raw = open_raw(&backups[0]).await;
+            for t in SYNCED_TABLES {
+                assert!(!columns(&raw, t).await.contains(&"uuid".to_string()), "{} in Sicherung schon umgestellt", t);
+            }
+            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
+                .fetch_one(&raw)
+                .await
+                .unwrap();
+            assert_eq!(n, 5);
+            let schema_meta: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'schema_meta'",
+            )
+            .fetch_one(&raw)
+            .await
+            .unwrap();
+            assert_eq!(schema_meta, 0);
+            raw.close().await;
+        }
+
+        #[tokio::test]
+        async fn test_migration_is_idempotent() {
+            let (dir, path) = legacy_fixture().await;
+            let db = open_db(&path).await;
+            let first = uuids(&db.pool, "observations").await;
+
+            let again = sync_schema::migrate_to_v2(&db.pool, &db.db_path).await.unwrap();
+            assert_eq!(again, MigrationOutcome::AlreadyCurrent);
+            assert_eq!(backups_in(dir.path()).len(), 1);
+            drop(db);
+
+            // Neustart der App
+            let db = open_db(&path).await;
+            assert_eq!(backups_in(dir.path()).len(), 1);
+            assert_eq!(uuids(&db.pool, "observations").await, first);
+            let version: String =
+                sqlx::query_scalar("SELECT value FROM schema_meta WHERE key = 'sync_schema_version'")
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(version, "2");
+        }
+
+        #[tokio::test]
+        async fn test_migration_allows_reusing_deleted_category_name() {
+            let (_dir, path) = legacy_fixture().await;
+            let db = open_db(&path).await;
+
+            sqlx::query("UPDATE categories SET deleted_at = '2026-01-01T00:00:00.000Z' WHERE name = 'Sozial'")
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO categories (name, source_device_id, uuid) VALUES ('Sozial', 'x', 'u-neu-1')")
+                .execute(&db.pool)
+                .await
+                .expect("Name einer gelöschten Kategorie muss wieder verwendbar sein");
+            let dup = sqlx::query("INSERT INTO categories (name, source_device_id, uuid) VALUES ('Sozial', 'x', 'u-neu-2')")
+                .execute(&db.pool)
+                .await;
+            assert!(dup.is_err(), "zwei aktive Kategorien gleichen Namens dürfen nicht entstehen");
+        }
+
+        #[tokio::test]
+        async fn test_migration_fresh_database_has_v2_schema_without_backup() {
+            let (db, dir) = create_test_db().await;
+            assert!(backups_in(dir.path()).is_empty());
+
+            for t in SYNCED_TABLES {
+                let cols = columns(&db.pool, t).await;
+                for c in ["uuid", "deleted_at", "modified_by_device"] {
+                    assert!(cols.contains(&c.to_string()), "{}.{} fehlt", t, c);
+                }
+            }
+            // Standard-Kategorien haben UUIDs
+            let missing: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM categories WHERE uuid IS NULL OR uuid = '' OR modified_by_device = ''",
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM categories")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(total, 5);
+            assert_eq!(missing, 0);
+
+            let cfg_cols = columns(&db.pool, "sync_config").await;
+            for c in ["device_role", "first_sync_done", "clock_offset_ms", "last_upload_hash", "remote_etags"] {
+                assert!(cfg_cols.contains(&c.to_string()), "sync_config.{} fehlt", c);
+            }
+            let (role, first, offset, hash, etags): (Option<String>, i64, i64, Option<String>, String) =
+                sqlx::query_as(
+                    "SELECT device_role, first_sync_done, clock_offset_ms, last_upload_hash, remote_etags FROM sync_config WHERE id = 1",
+                )
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!((role, first, offset, hash, etags.as_str()), (None, 0, 0, None, "{}"));
+
+            // Platzhalter-Zeile gilt nicht als konfigurierte WebDAV-Verbindung
+            assert!(db.get_webdav_credentials().await.unwrap().is_none());
+            assert_eq!(db.clock.offset_ms(), 0);
+
+            // Speichern von Zugangsdaten funktioniert weiterhin
+            db.store_webdav_credentials("https://dav".into(), "u".into(), "pw".into())
+                .await
+                .unwrap();
+            let creds = db.get_webdav_credentials().await.unwrap().unwrap();
+            assert_eq!(creds, ("https://dav".into(), "u".into(), "pw".into()));
+        }
+
+        #[tokio::test]
+        async fn test_migration_keeps_existing_sync_config_and_loads_clock_offset() {
+            let (_dir, path) = legacy_fixture().await;
+            let db = open_db(&path).await;
+            let (url, last, role, first, etags): (String, Option<String>, Option<String>, i64, String) =
+                sqlx::query_as(
+                    "SELECT webdav_url, last_sync_timestamp, device_role, first_sync_done, remote_etags FROM sync_config WHERE id = 1",
+                )
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(url, "https://dav.example.org/remote.php/dav/files/lehrer/");
+            assert_eq!(last.as_deref(), Some("2025-11-01 07:00:00"));
+            assert_eq!((role, first, etags.as_str()), (None, 0, "{}"));
+            assert_eq!(db.clock.offset_ms(), 0);
+
+            sqlx::query("UPDATE sync_config SET clock_offset_ms = -4321 WHERE id = 1")
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            drop(db);
+            let db = open_db(&path).await;
+            assert_eq!(db.clock.offset_ms(), -4321);
+        }
+
+        #[tokio::test]
+        async fn test_migration_tolerates_preexisting_orphan_rows() {
+            let (_dir, path) = legacy_fixture().await;
+            {
+                let raw = open_raw(&path).await;
+                sqlx::query("INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id) VALUES (6, 99, 1, 'Sozial', 'Waise', '[]', '2025-09-06 08:00:00', '2025-09-06 08:00:00', 'laptop-A')")
+                    .execute(&raw)
+                    .await
+                    .unwrap();
+                raw.close().await;
+            }
+            let before = snapshot_legacy(&path).await;
+            let db = open_db(&path).await;
+            for (t, cols, rows) in &before {
+                assert_eq!(&dump(&db.pool, t, cols).await, rows, "{}", t);
+            }
+            let u = uuids(&db.pool, "observations").await;
+            assert_eq!(u.len(), 6);
+            assert!(u.iter().all(|(_, u)| u.is_some()));
+        }
+
+        #[tokio::test]
+        async fn test_migration_backup_failure_changes_nothing() {
+            let (dir, path) = legacy_fixture().await;
+            let pool = open_raw(&path).await;
+            // Sicherung soll in ein nicht existierendes Verzeichnis gehen → muss scheitern
+            let bogus = dir.path().join("gibt-es-nicht").join("observations.db");
+            let res = sync_schema::migrate_to_v2(&pool, &bogus).await;
+            assert!(res.is_err());
+            for t in SYNCED_TABLES {
+                assert!(!columns(&pool, t).await.contains(&"uuid".to_string()), "{}", t);
+            }
+            let meta: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'schema_meta'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(meta, 0);
+            pool.close().await;
+        }
+
+        #[tokio::test]
+        async fn test_migration_refuses_unknown_category_columns() {
+            let (_dir, path) = legacy_fixture().await;
+            let pool = open_raw(&path).await;
+            sqlx::query("ALTER TABLE categories ADD COLUMN icon TEXT DEFAULT 'x'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let res = sync_schema::migrate_to_v2(&pool, &path).await;
+            assert!(res.is_err(), "unbekannte Spalte darf nicht stillschweigend verworfen werden");
+            assert!(columns(&pool, "categories").await.contains(&"icon".to_string()));
+            assert!(!columns(&pool, "classes").await.contains(&"uuid".to_string()));
+            pool.close().await;
+        }
     }
 }
