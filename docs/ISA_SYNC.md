@@ -39,7 +39,8 @@ Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 | 2026-11-17 | Aufbau: jedes Gerät legt genau eine Datei mit seinem Gesamtstand ab, Zusammenführen pro Datensatz (Design: `docs/superpowers/specs/2026-11-17-sync-redesign-design.md`). |
 | 2026-11-17 | Zeitquelle: Uhrzeit des WebDAV-Servers, kein NTP. |
 | 2026-11-17 | Endgültiges Löschen gewinnt immer gegen Bearbeitungen, auch jüngere; Kaskade auf abhängige Datensätze. |
-| 2026-11-17 | Laptop ist maßgeblich; vorhandene Workstation-Daten sind veraltet und dürfen beim ersten Abgleich ersetzt werden (nur auf ausdrückliche Wahl, mit Sicherungskopie). |
+| 2026-11-17 | Laptop ist maßgeblich; vorhandene Workstation-Daten sind veraltet und werden beim **ersten** Abgleich durch den Laptop-Stand ersetzt (mit Sicherungskopie), danach normales Zusammenführen. |
+| 2026-11-17 | Pflichtauswahl der Geräterolle Laptop/Desktop beim ersten Start; Desktop wartet beim ersten Abgleich auf einen Laptop-Stand und lädt bis dahin nichts hoch. |
 | 2026-11-17 | Bearbeitete Beobachtungen: Import übernimmt die Fassung mit jüngerem `updated_at`; Übernahme nur, wenn `source_device_id` und `created_at` übereinstimmen (Schutz gegen ID-Kollision). Gleichstand → lokale Fassung bleibt. |
 
 ## 4. Offene Fragen

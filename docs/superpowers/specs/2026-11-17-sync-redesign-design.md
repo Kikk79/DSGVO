@@ -154,25 +154,30 @@ Zeitquelle: (1) nur NTP, (2) NTP mit WebDAV-Ersatz, (3) **nur WebDAV-Serverzeit 
 - Nachweis vor Auslieferung: Umstellung gegen eine Kopie einer realistisch befüllten alten
   Datenbank testen (gleiche Zeilenzahl und Inhalte vorher/nachher).
 
-### 5.8 Erster Abgleich der Workstation
-Entscheidung Auftraggeber: Daten, die heute auf der Workstation liegen, sind veraltet und
-dürfen weg. Maßgeblich ist der Laptop.
+### 5.8 Geräterolle und erster Abgleich
+Entscheidungen Auftraggeber: Der Laptop ist maßgeblich. Daten, die heute auf der Workstation
+liegen, sind veraltet und dürfen weg, **nur beim ersten Abgleich**. Danach wird immer normal
+pro Datensatz zusammengeführt. Die Rolle wird über eine Pflichtauswahl festgelegt.
 
-- Hat ein Gerät lokal Daten, hat noch nie mit diesem WebDAV-Ordner abgeglichen, und liegen dort
-  Gesamtstände anderer Geräte, wird **nicht automatisch** abgeglichen. Die App fragt:
-  - „Stand vom Server übernehmen“: lokale Daten werden verworfen und durch den Stand vom Server
-    ersetzt. Vorher wird die Datenbankdatei als Kopie gesichert (wie 5.7).
-  - „Zusammenführen“: normaler Abgleich.
-  - „Abbrechen“: kein Abgleich.
-  Die Rückfrage zeigt, von welchem Gerät der Server-Stand stammt (Gerätename, Zeitpunkt,
-  Anzahl Schüler und Beobachtungen), damit erkennbar ist, dass es der Laptop ist.
-- Leeres Gerät: ohne Rückfrage übernehmen.
-- Schutz des Laptops: Nichts löscht lokale Daten ohne diese ausdrückliche Wahl. Empfohlene
-  Reihenfolge bei der Einführung: **zuerst den Laptop aktualisieren und abgleichen**, dann die
-  Workstation. In der Anleitung und im Release-Hinweis festhalten.
-- Das Ersetzen gibt es **nur beim ersten Abgleich** eines Geräts mit diesem WebDAV-Ordner
-  (Entscheidung Auftraggeber). Danach wird immer normal pro Datensatz zusammengeführt;
-  eine spätere Aktion „Stand vom Server übernehmen“ gibt es nicht.
+- **Pflichtauswahl** beim ersten Start der neuen Version, einmal pro Gerät, ohne Auswahl
+  kein Weiterarbeiten: „Laptop“ (Beobachtungen werden hier gesammelt, Stand maßgeblich) oder
+  „Desktop“ (Arbeitsplatzrechner, übernimmt beim ersten Abgleich den Stand vom Laptop).
+  Vorausgewählt aus dem vorhandenen Gerätetyp (`notebook` → Laptop, `computer` → Desktop),
+  muss aber bestätigt werden. Später änderbar unter Einstellungen → Synchronisation.
+- Die Rolle steht in der Server-Datei (`device_role`), damit andere Geräte sie sehen.
+- **Laptop:** seine lokalen Daten werden nie ersetzt; er gleicht immer normal ab.
+- **Desktop, erster Abgleich mit diesem WebDAV-Ordner:**
+  - Liegt noch kein Gesamtstand eines Laptops auf dem Server: nichts hochladen, nichts
+    zusammenführen, Hinweis „Warte auf den Stand vom Laptop“.
+  - Liegt einer vor: Sicherungskopie der Datenbankdatei (wie 5.7), lokale fachliche Daten
+    verwerfen, Stand des Laptops übernehmen, ohne Rückfrage. Danach als „erster Abgleich
+    erledigt“ merken und normal weiter.
+  - Ist der Desktop lokal leer, entfällt die Sicherungskopie.
+- **Nach dem ersten Abgleich** hat die Rolle keine Wirkung mehr auf das Zusammenführen.
+- **Fehlbedienung:** Beide „Laptop“ → normal zusammenführen, nichts geht verloren (alte
+  Workstation-Einträge bleiben ggf. erhalten). Beide „Desktop“ → beide warten mit Hinweis
+  „Kein Laptop gefunden“. Mehrere Laptops: maßgeblich ist für einen Desktop der zuletzt
+  geschriebene Laptop-Stand.
 
 ### 5.9 Datei-Austausch und Sicherungen
 - „Austausch per Datei“ (Einstellungen → Synchronisation) nutzt dasselbe Snapshot-Format und
@@ -183,9 +188,11 @@ dürfen weg. Maßgeblich ist der Laptop.
   Zeilen statt sie zu verdoppeln. *(Entscheidung Umsetzung/Design)*
 
 ### 5.10 Oberfläche
+- Pflichtauswahl Laptop/Desktop (5.8) als eigener Bildschirm vor der App.
 - Synchronisation-Reiter: Texte an neuen Umfang anpassen (alles wird abgeglichen, Löschungen
   werden übertragen), Hinweis „Löschungen werden nicht übertragen“ entfernen, Abweichung der
-  Rechneruhr zur Serverzeit anzeigen, Rückfrage aus 5.8.
+  Rechneruhr zur Serverzeit anzeigen, Geräterolle anzeigen und ändern, Status „Warte auf den
+  Stand vom Laptop“.
 - `docs/ISA_SYNC.md` im selben Zug aktualisieren.
 
 ## 6. Dem Umsetzer überlassen
