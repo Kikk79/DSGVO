@@ -10,6 +10,7 @@ mod webdav_sync;
 mod sync_time;
 mod snapshot;
 mod merge;
+mod legacy_import;
 mod sync_schema;
 
 #[cfg(test)]
@@ -297,18 +298,43 @@ async fn export_student_data(
 
 // P2P sync commands removed - using file-based changeset sync
 
-#[tauri::command]
-async fn export_changeset(state: tauri::State<'_, AppState>) -> Result<String, String> {
+/// Gesamtstand dieses Geräts als Datei-Inhalt (`snapshot_v2`); immer vollständig.
+async fn build_export_bytes(state: &AppState) -> Result<Vec<u8>, String> {
+    let config = state
+        .crypto
+        .get_device_config()
+        .map_err(|e| e.to_string())?;
     let db = state.db.lock().await;
-    let changeset = db
-        .get_pending_changesets("export")
+    let snap = snapshot::build_snapshot(
+        &db,
+        config.get("device_type").cloned(),
+        config.get("device_name").cloned(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(snapshot::encode(&snap))
+}
+
+/// Datei-Import (neues oder altes Format) mit Audit-Einträgen nach dem Zusammenführen.
+async fn import_bytes_with_audit(state: &AppState, bytes: &[u8]) -> Result<String, String> {
+    let outcome = {
+        let db = state.db.lock().await;
+        legacy_import::import_bytes(&db, bytes)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    merge::log_merge_audit(&state.audit, &outcome.report)
         .await
         .map_err(|e| e.to_string())?;
+    Ok(outcome.summary())
+}
 
-    // Convert to base64 for safe transport (legacy compatibility)
-    let encoded = base64::prelude::BASE64_STANDARD.encode(&changeset);
+#[tauri::command]
+async fn export_changeset(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let bytes = build_export_bytes(&state).await?;
+    // Base64 für sicheren Transport (wie bisher)
+    let encoded = base64::prelude::BASE64_STANDARD.encode(&bytes);
 
-    // Log the export
     state
         .audit
         .log_action("export", "changeset", 0, 1, None)
@@ -318,36 +344,28 @@ async fn export_changeset(state: tauri::State<'_, AppState>) -> Result<String, S
     Ok(encoded)
 }
 
+/// `days_back` bleibt aus Kompatibilität zum Frontend, wird ignoriert (immer vollständiger Stand).
 #[tauri::command]
 async fn export_changeset_to_file(
     state: tauri::State<'_, AppState>,
     file_path: String,
-    days_back: Option<u32>,
+    #[allow(unused_variables)] days_back: Option<u32>,
 ) -> Result<String, String> {
-    let days_back = days_back.unwrap_or(30); // Default to 30 days
-    let db = state.db.lock().await;
+    let data = build_export_bytes(&state).await?;
 
-    // Generate enhanced changeset with metadata
-    let changeset_data = db
-        .create_changeset_file(days_back)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Write to file
-    std::fs::write(&file_path, &changeset_data)
+    std::fs::write(&file_path, &data)
         .map_err(|e| format!("Failed to write changeset file: {}", e))?;
 
-    // Log the export with file path
     state
         .audit
         .log_action("export", "changeset_file", 0, 1, Some(&file_path))
         .await
         .map_err(|e| e.to_string())?;
 
-    let file_size = changeset_data.len();
     Ok(format!(
         "Changeset exported to {} ({} bytes)",
-        file_path, file_size
+        file_path,
+        data.len()
     ))
 }
 
@@ -360,12 +378,8 @@ async fn import_changeset(
         .decode(&changeset_data)
         .map_err(|e| format!("Invalid changeset format: {}", e))?;
 
-    let db = state.db.lock().await;
-    db.apply_changeset(&changeset, "import")
-        .await
-        .map_err(|e| e.to_string())?;
+    import_bytes_with_audit(&state, &changeset).await?;
 
-    // Log the import
     state
         .audit
         .log_action("import", "changeset", 0, 1, None)
@@ -380,17 +394,11 @@ async fn import_changeset_from_file(
     state: tauri::State<'_, AppState>,
     file_path: String,
 ) -> Result<String, String> {
-    // Read changeset file
     let changeset_data =
         std::fs::read(&file_path).map_err(|e| format!("Failed to read changeset file: {}", e))?;
 
-    let db = state.db.lock().await;
-    let import_result = db
-        .apply_changeset_file(&changeset_data)
-        .await
-        .map_err(|e| e.to_string())?;
+    let import_result = import_bytes_with_audit(&state, &changeset_data).await?;
 
-    // Log the import with file path
     state
         .audit
         .log_action("import", "changeset_file", 0, 1, Some(&file_path))
@@ -403,90 +411,22 @@ async fn import_changeset_from_file(
     ))
 }
 
+/// Sicherung: vollständiger Gesamtstand (`snapshot_v2`) als Text. `days_back` wird ignoriert.
 #[tauri::command]
 async fn export_all_data(
     state: tauri::State<'_, AppState>,
-    days_back: Option<i32>,
+    #[allow(unused_variables)] days_back: Option<i32>,
 ) -> Result<String, String> {
-    let db = state.db.lock().await;
-
-    // Get all students, classes, categories, and observations
-    let students = db
-        .get_all_students_including_deleted()
-        .await
-        .map_err(|e| e.to_string())?;
-    let classes = db.get_classes().await.map_err(|e| e.to_string())?;
-    let categories = db.get_categories().await.map_err(|e| e.to_string())?;
-
-    // Filter observations by date if specified
-    let observations = if let Some(days) = days_back {
-        if days > 0 {
-            // Get observations from specific time range
-            let cutoff_date = chrono::Utc::now() - chrono::Duration::days(days as i64);
-            db.get_observations_since(cutoff_date)
-                .await
-                .map_err(|e| e.to_string())?
-        } else {
-            // days_back <= 0 means all data
-            db.search_observations(None, None, None)
-                .await
-                .map_err(|e| e.to_string())?
-        }
-    } else {
-        // No filter - get all observations
-        db.search_observations(None, None, None)
-            .await
-            .map_err(|e| e.to_string())?
-    };
-
-    // Get device config for metadata
-    let device_config = state
-        .crypto
-        .get_device_config()
-        .map_err(|e| e.to_string())?;
-
-    // Create comprehensive export data
-    let export_data = serde_json::json!({
-        "format": "full_export",
-        "version": "1.1",
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "export_scope": {
-            "days_back": days_back,
-            "total_students": students.len(),
-            "total_classes": classes.len(),
-            "total_observations": observations.len(),
-            "total_categories": categories.len()
-        },
-        "source_device": {
-            "device_type": device_config.get("device_type").unwrap_or(&"unknown".to_string()),
-            "device_name": device_config.get("device_name"),
-            "device_id": device_config.get("device_id")
-        },
-        "data": {
-            "students": students,
-            "classes": classes,
-            "observations": observations,
-            "categories": categories
-        },
-        "device_config": {
-            "device_type": device_config.get("device_type").unwrap_or(&"unknown".to_string()).clone(),
-            "device_name": device_config.get("device_name").cloned()
-        }
-    });
-
-    // Log the export
-    let scope_description = match days_back {
-        Some(days) if days > 0 => format!("last {} days", days),
-        _ => "all data".to_string(),
-    };
+    let bytes = build_export_bytes(&state).await?;
+    let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
 
     state
         .audit
-        .log_action("export", "all_data", 0, 1, Some(&scope_description))
+        .log_action("export", "all_data", 0, 1, Some("all data"))
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(export_data.to_string())
+    Ok(text)
 }
 
 #[tauri::command]
@@ -494,16 +434,10 @@ async fn import_full_backup(
     state: tauri::State<'_, AppState>,
     file_path: String,
 ) -> Result<String, String> {
-    // Read backup file
     let backup_data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
 
-    let db = state.db.lock().await;
-    let import_result = db
-        .import_full_backup(&backup_data)
-        .await
-        .map_err(|e| e.to_string())?;
+    let import_result = import_bytes_with_audit(&state, &backup_data).await?;
 
-    // Log the import with file path
     state
         .audit
         .log_action("import", "full_backup", 0, 1, Some(&file_path))
@@ -521,13 +455,8 @@ async fn import_changeset_data(
     state: tauri::State<'_, AppState>,
     changeset_data: String,
 ) -> Result<String, String> {
-    let db = state.db.lock().await;
-    let import_result = db
-        .apply_changeset_file(changeset_data.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
+    let import_result = import_bytes_with_audit(&state, changeset_data.as_bytes()).await?;
 
-    // Log the import
     state
         .audit
         .log_action("import", "changeset_data", 0, 1, Some("direct"))
@@ -542,13 +471,8 @@ async fn import_full_backup_data(
     state: tauri::State<'_, AppState>,
     backup_data: String,
 ) -> Result<String, String> {
-    let db = state.db.lock().await;
-    let import_result = db
-        .import_full_backup(backup_data.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
+    let import_result = import_bytes_with_audit(&state, backup_data.as_bytes()).await?;
 
-    // Log the import
     state
         .audit
         .log_action("import", "full_backup_data", 0, 1, Some("direct"))

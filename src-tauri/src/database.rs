@@ -1031,391 +1031,11 @@ impl Database {
         Ok(final_changeset.to_string().into_bytes())
     }
 
+    /// Übergangslösung, bis die WebDAV-Abgleichsschleife auf Sync v2 umgestellt ist:
+    /// nimmt Dateien im neuen und im alten Format entgegen und führt sie zusammen.
     pub async fn apply_changeset_file(&self, changeset_data: &[u8]) -> Result<String> {
-        let content = String::from_utf8(changeset_data.to_vec())
-            .context("Invalid changeset file encoding")?;
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&content).context("Invalid changeset file format")?;
-
-        // Verify checksum
-        let stored_checksum = parsed
-            .get("checksum")
-            .and_then(|c| c.as_str())
-            .context("Missing checksum in changeset file")?;
-
-        let data_section = parsed
-            .get("data")
-            .context("Missing data section in changeset file")?;
-
-        let data_content = data_section.to_string();
-        let mut hasher = Sha256::new();
-        hasher.update(data_content.as_bytes());
-        let calculated_checksum = format!("{:x}", hasher.finalize());
-
-        if stored_checksum != calculated_checksum {
-            return Err(anyhow::anyhow!("Checksum verification failed"));
-        }
-
-        // Extract observations and merge them
-        let observations_data = data_section
-            .get("changes")
-            .and_then(|c| c.get("observations"))
-            .and_then(|o| o.as_array())
-            .context("Invalid observations data in changeset")?;
-
-        let mut imported_count = 0;
-        for obs_value in observations_data {
-            if let Ok(obs) = serde_json::from_value::<Observation>(obs_value.clone()) {
-                // Check if observation already exists
-                let exists =
-                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM observations WHERE id = ?")
-                        .bind(obs.id)
-                        .fetch_one(&self.pool)
-                        .await?;
-
-                if exists == 0 {
-                    let (uuid, modified_by) = Self::import_stamp(
-                        "observations",
-                        &obs.uuid,
-                        &obs.modified_by_device,
-                        &obs.source_device_id,
-                        obs.id,
-                        obs.created_at,
-                    );
-                    // Insert new observation (preserving original ID and timestamps)
-                    sqlx::query(
-                        r#"
-                        INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id, uuid, modified_by_device)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        "#,
-                    )
-                    .bind(obs.id)
-                    .bind(obs.student_id)
-                    .bind(obs.author_id)
-                    .bind(obs.category)
-                    .bind(obs.text)
-                    .bind(obs.tags)
-                    .bind(obs.created_at)
-                    .bind(obs.updated_at)
-                    .bind(&obs.source_device_id)
-                    .bind(&uuid)
-                    .bind(&modified_by)
-                    .execute(&self.pool)
-                    .await?;
-
-                    imported_count += 1;
-                } else if self.merge_existing_observation(obs).await? {
-                    imported_count += 1;
-                }
-            }
-        }
-
-        Ok(format!(
-            "Successfully imported {} observations",
-            imported_count
-        ))
-    }
-
-    /// UUID und Änderungsgerät einer importierten Zeile: übernommen, sonst abgeleitet
-    /// (Dateien aus der Zeit vor Sync v2 tragen beides nicht).
-    fn import_stamp(
-        table: &str,
-        uuid: &str,
-        modified_by_device: &str,
-        source_device_id: &str,
-        id: i64,
-        created_at: chrono::DateTime<chrono::Utc>,
-    ) -> (String, String) {
-        let uuid = if uuid.is_empty() {
-            derived_uuid(table, source_device_id, id, &format_ts(created_at))
-        } else {
-            uuid.to_string()
-        };
-        let modified_by = if modified_by_device.is_empty() {
-            source_device_id.to_string()
-        } else {
-            modified_by_device.to_string()
-        };
-        (uuid, modified_by)
-    }
-
-    /// Last-write-wins merge of an imported observation whose id already exists locally.
-    /// Returns true if the local row was overwritten with the imported edit.
-    async fn merge_existing_observation(&self, incoming: Observation) -> Result<bool> {
-        let existing = sqlx::query_as::<_, Observation>("SELECT * FROM observations WHERE id = ?")
-            .bind(incoming.id)
-            .fetch_one(&self.pool)
-            .await?;
-
-        // Löschvermerke werden nie durch Importe mit Inhalt überschrieben.
-        if existing.deleted_at.is_some() {
-            return Ok(false);
-        }
-
-        // Ids are assigned per device (AUTOINCREMENT), so the same id can belong to a
-        // different observation created elsewhere. Only merge when origin device and
-        // creation time match as well; otherwise keep the local row as before.
-        let same_observation = existing.source_device_id == incoming.source_device_id
-            && existing.created_at == incoming.created_at;
-
-        // Timestamps are compared as parsed values, not as SQL text: the column holds
-        // both CURRENT_TIMESTAMP and RFC 3339 formatted values, which do not sort together.
-        if !same_observation || incoming.updated_at <= existing.updated_at {
-            return Ok(false);
-        }
-
-        let modified_by = if incoming.modified_by_device.is_empty() {
-            incoming.source_device_id.clone()
-        } else {
-            incoming.modified_by_device.clone()
-        };
-
-        sqlx::query(
-            "UPDATE observations SET category = ?, text = ?, tags = ?, updated_at = ?, modified_by_device = ? WHERE id = ?",
-        )
-        .bind(incoming.category)
-        .bind(incoming.text)
-        .bind(incoming.tags)
-        .bind(incoming.updated_at)
-        .bind(modified_by)
-        .bind(incoming.id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(true)
-    }
-
-    pub async fn import_full_backup(&self, backup_data: &[u8]) -> Result<String> {
-        let content =
-            String::from_utf8(backup_data.to_vec()).context("Invalid backup file encoding")?;
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&content).context("Invalid backup file format")?;
-
-        let mut imported_students = 0;
-        let mut imported_classes = 0;
-        let mut imported_observations = 0;
-
-        // Import classes first (due to foreign key constraints)
-        if let Some(classes_data) = parsed
-            .get("data")
-            .and_then(|d| d.get("classes"))
-            .and_then(|c| c.as_array())
-        {
-            for class_value in classes_data {
-                if let Ok(class) = serde_json::from_value::<Class>(class_value.clone()) {
-                    let exists =
-                        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM classes WHERE id = ?")
-                            .bind(class.id)
-                            .fetch_one(&self.pool)
-                            .await?;
-
-                    if exists == 0 {
-                        let (uuid, modified_by) = Self::import_stamp(
-                            "classes",
-                            &class.uuid,
-                            &class.modified_by_device,
-                            &class.source_device_id,
-                            class.id,
-                            class.created_at,
-                        );
-                        sqlx::query(
-                            "INSERT INTO classes (id, name, school_year, created_at, updated_at, source_device_id, uuid, modified_by_device) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        )
-                        .bind(class.id)
-                        .bind(class.name)
-                        .bind(class.school_year)
-                        .bind(class.created_at)
-                        .bind(class.updated_at)
-                        .bind(class.source_device_id)
-                        .bind(uuid)
-                        .bind(modified_by)
-                        .execute(&self.pool)
-                        .await?;
-
-                        imported_classes += 1;
-                    }
-                }
-            }
-        }
-
-        // Import students
-        if let Some(students_data) = parsed
-            .get("data")
-            .and_then(|d| d.get("students"))
-            .and_then(|s| s.as_array())
-        {
-            for student_value in students_data {
-                if let Ok(student) = serde_json::from_value::<Student>(student_value.clone()) {
-                    let exists =
-                        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE id = ?")
-                            .bind(student.id)
-                            .fetch_one(&self.pool)
-                            .await?;
-
-                    if exists == 0 {
-                        // Student doesn't exist - insert new student
-                        let (uuid, modified_by) = Self::import_stamp(
-                            "students",
-                            &student.uuid,
-                            &student.modified_by_device,
-                            &student.source_device_id,
-                            student.id,
-                            student.created_at,
-                        );
-                        sqlx::query(
-                            "INSERT INTO students (id, class_id, first_name, last_name, status, created_at, updated_at, source_device_id, uuid, modified_by_device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        )
-                        .bind(student.id)
-                        .bind(student.class_id)
-                        .bind(student.first_name)
-                        .bind(student.last_name)
-                        .bind(student.status)
-                        .bind(student.created_at)
-                        .bind(student.updated_at)
-                        .bind(student.source_device_id)
-                        .bind(uuid)
-                        .bind(modified_by)
-                        .execute(&self.pool)
-                        .await?;
-
-                        imported_students += 1;
-                    } else {
-                        // Löschvermerke werden nie durch Importe mit Inhalt überschrieben.
-                        let tombstoned: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM students WHERE id = ? AND deleted_at IS NOT NULL",
-                        )
-                        .bind(student.id)
-                        .fetch_one(&self.pool)
-                        .await?;
-                        if tombstoned > 0 {
-                            continue;
-                        }
-
-                        // Student exists - check if it's deleted and needs reactivation
-                        let current_status = sqlx::query_scalar::<_, String>(
-                            "SELECT status FROM students WHERE id = ?",
-                        )
-                        .bind(student.id)
-                        .fetch_one(&self.pool)
-                        .await?;
-
-                        if current_status == "deleted" && student.status != "deleted" {
-                            // Reactivate deleted student by updating all fields
-                            sqlx::query(
-                                "UPDATE students SET class_id = ?, first_name = ?, last_name = ?, status = ?, updated_at = ?, source_device_id = ?, modified_by_device = ? WHERE id = ?",
-                            )
-                            .bind(student.class_id)
-                            .bind(student.first_name)
-                            .bind(student.last_name)
-                            .bind(student.status)
-                            .bind(student.updated_at)
-                            .bind(&student.source_device_id)
-                            .bind(if student.modified_by_device.is_empty() {
-                                student.source_device_id.clone()
-                            } else {
-                                student.modified_by_device.clone()
-                            })
-                            .bind(student.id)
-                            .execute(&self.pool)
-                            .await?;
-
-                            imported_students += 1;
-                        } else if student.status == "active" {
-                            // Update existing active student with new data
-                            sqlx::query(
-                                "UPDATE students SET class_id = ?, first_name = ?, last_name = ?, updated_at = ?, source_device_id = ?, modified_by_device = ? WHERE id = ?",
-                            )
-                            .bind(student.class_id)
-                            .bind(student.first_name)
-                            .bind(student.last_name)
-                            .bind(student.updated_at)
-                            .bind(&student.source_device_id)
-                            .bind(if student.modified_by_device.is_empty() {
-                                student.source_device_id.clone()
-                            } else {
-                                student.modified_by_device.clone()
-                            })
-                            .bind(student.id)
-                            .execute(&self.pool)
-                            .await?;
-
-                            imported_students += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Import observations
-        if let Some(observations_data) = parsed
-            .get("data")
-            .and_then(|d| d.get("observations"))
-            .and_then(|o| o.as_array())
-        {
-            for obs_value in observations_data {
-                if let Ok(obs) = serde_json::from_value::<Observation>(obs_value.clone()) {
-                    let exists = sqlx::query_scalar::<_, i64>(
-                        "SELECT COUNT(*) FROM observations WHERE id = ?",
-                    )
-                    .bind(obs.id)
-                    .fetch_one(&self.pool)
-                    .await?;
-
-                    if exists == 0 {
-                        let (uuid, modified_by) = Self::import_stamp(
-                            "observations",
-                            &obs.uuid,
-                            &obs.modified_by_device,
-                            &obs.source_device_id,
-                            obs.id,
-                            obs.created_at,
-                        );
-                        sqlx::query(
-                            "INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id, uuid, modified_by_device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        )
-                        .bind(obs.id)
-                        .bind(obs.student_id)
-                        .bind(obs.author_id)
-                        .bind(obs.category)
-                        .bind(obs.text)
-                        .bind(obs.tags)
-                        .bind(obs.created_at)
-                        .bind(obs.updated_at)
-                        .bind(obs.source_device_id)
-                        .bind(uuid)
-                        .bind(modified_by)
-                        .execute(&self.pool)
-                        .await?;
-
-                        imported_observations += 1;
-                    } else if self.merge_existing_observation(obs).await? {
-                        imported_observations += 1;
-                    }
-                }
-            }
-        }
-
-        // Import categories
-        let mut imported_categories = 0;
-        if let Some(categories_data) = parsed
-            .get("data")
-            .and_then(|d| d.get("categories"))
-            .and_then(|c| c.as_array())
-        {
-            imported_categories = self.import_categories_with_merge(categories_data).await?;
-        }
-
-        // Import device config
-        if let Some(device_config) = parsed.get("device_config") {
-            self.import_device_config(device_config).await?;
-        }
-
-        Ok(format!(
-            "Successfully imported {} classes, {} students, {} observations, {} categories",
-            imported_classes, imported_students, imported_observations, imported_categories
-        ))
+        let outcome = crate::legacy_import::import_bytes(self, changeset_data).await?;
+        Ok(outcome.summary())
     }
 
     async fn seed_default_categories(&self) -> Result<()> {
@@ -2265,8 +1885,8 @@ mod tests {
         assert_eq!(observations_after_hard.len(), 0);
 
         // Ein Löschvermerk gewinnt: ein alter Import belebt Schüler und Beobachtung nicht wieder
-        let result = db.import_full_backup(&backup_data).await.unwrap();
-        assert!(result.contains("Successfully imported"));
+        let result = db.apply_changeset_file(&backup_data).await.unwrap();
+        assert!(result.contains("neu"), "{result}");
         assert_eq!(db.get_students().await.unwrap().len(), 0);
         assert_eq!(db.search_observations(None, None, None).await.unwrap().len(), 0);
         let leaked: i64 = sqlx::query_scalar(
@@ -2428,7 +2048,6 @@ mod tests {
     async fn test_changeset_file_operations() {
         let (db, _temp_dir) = create_test_db().await;
 
-        // Setup test data
         let class = db
             .create_class("5a".to_string(), "2023/24".to_string())
             .await
@@ -2448,27 +2067,20 @@ mod tests {
             .await
             .unwrap();
 
-        // Create changeset file
-        let changeset_data = db.create_changeset_file(30).await.unwrap();
-        assert!(!changeset_data.is_empty());
-
-        // Parse the changeset to verify structure
-        let content = String::from_utf8(changeset_data.clone()).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-
+        // Datei-Austausch im neuen Format: Gesamtstand schreiben, Datenbank leeren, einspielen
+        let snap = crate::snapshot::build_snapshot(&db, None, None).await.unwrap();
+        let changeset_data = crate::snapshot::encode(&snap);
+        let parsed: serde_json::Value = serde_json::from_slice(&changeset_data).unwrap();
         assert!(parsed.get("checksum").is_some());
         assert!(parsed.get("data").is_some());
 
-        // Clear database and re-import
         db.clear_all_data().await.unwrap();
         let empty_observations = db.search_observations(None, None, None).await.unwrap();
         assert_eq!(empty_observations.len(), 0);
 
-        // Apply changeset
         let result = db.apply_changeset_file(&changeset_data).await.unwrap();
-        assert!(result.contains("Successfully imported"));
+        assert!(result.contains("neu"), "{result}");
 
-        // Verify data was restored
         let restored_observations = db.search_observations(None, None, None).await.unwrap();
         assert_eq!(restored_observations.len(), 1);
         assert_eq!(restored_observations[0].text, "Test for changeset");
@@ -2525,10 +2137,11 @@ mod tests {
         db.clear_all_data().await.unwrap();
 
         // Import backup
-        let result = db.import_full_backup(&backup_data).await.unwrap();
-        assert!(result.contains("Successfully imported"));
+        let result = db.apply_changeset_file(&backup_data).await.unwrap();
+        assert_eq!(result, "3 neu, 0 aktualisiert, 0 gelöscht");
 
-        // Verify imported data
+        // Verify imported data (Zeilen bekommen lokale IDs; die Sicherung enthält nur die
+        // importierte Beobachtung, die ursprüngliche wurde vorher gelöscht)
         let classes = db.get_classes().await.unwrap();
         assert_eq!(classes.len(), 1);
 
@@ -2536,14 +2149,8 @@ mod tests {
         assert_eq!(students.len(), 1);
 
         let observations = db.search_observations(None, None, None).await.unwrap();
-        assert_eq!(observations.len(), 2); // Original + imported
-
-        // Find the imported observation
-        let imported_obs = observations
-            .iter()
-            .find(|o| o.text == "Imported observation")
-            .expect("Imported observation not found");
-        assert_eq!(imported_obs.id, 999);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].text, "Imported observation");
     }
 
     #[tokio::test]
@@ -2686,105 +2293,6 @@ mod tests {
     // ========== UNIFIED SYNCHRONIZATION SYSTEM TESTS ==========
 
     #[tokio::test]
-    async fn test_sync_export_changeset_empty_database() {
-        let (db, _temp_dir) = create_test_db().await;
-
-        // Export changeset from empty database
-        let changeset = db.create_changeset_file(30).await.unwrap();
-        assert!(!changeset.is_empty());
-
-        // Parse and verify structure
-        let changeset_data: serde_json::Value =
-            serde_json::from_str(&String::from_utf8(changeset).unwrap()).unwrap();
-        assert_eq!(
-            changeset_data["changeset"]["students"]
-                .as_array()
-                .unwrap()
-                .len(),
-            0
-        );
-        assert_eq!(
-            changeset_data["changeset"]["classes"]
-                .as_array()
-                .unwrap()
-                .len(),
-            0
-        );
-        assert_eq!(
-            changeset_data["changeset"]["observations"]
-                .as_array()
-                .unwrap()
-                .len(),
-            0
-        );
-        assert!(changeset_data["checksum"].as_str().unwrap().len() > 0);
-    }
-
-    #[tokio::test]
-    async fn test_sync_export_changeset_with_data() {
-        let (db, _temp_dir) = create_test_db().await;
-
-        // Setup test data
-        let class = db
-            .create_class("5a".to_string(), "2023/24".to_string())
-            .await
-            .unwrap();
-        let student = db
-            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
-            .await
-            .unwrap();
-        let observation = db
-            .create_observation(
-                student.id,
-                1,
-                "test".to_string(),
-                "Test observation".to_string(),
-                vec!["tag1".to_string()],
-            )
-            .await
-            .unwrap();
-
-        // Export changeset
-        let changeset = db.create_changeset_file(30).await.unwrap();
-
-        // Parse and verify content
-        let changeset_data: serde_json::Value =
-            serde_json::from_str(&String::from_utf8(changeset).unwrap()).unwrap();
-        assert_eq!(
-            changeset_data["changeset"]["students"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            changeset_data["changeset"]["classes"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            changeset_data["changeset"]["observations"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-
-        // Verify checksum exists
-        let checksum = changeset_data["checksum"].as_str().unwrap();
-        assert!(!checksum.is_empty());
-
-        // Verify metadata
-        assert!(changeset_data["timestamp"].as_str().is_some());
-        assert_eq!(
-            changeset_data["source_device_id"].as_str().unwrap(),
-            "device_001"
-        );
-    }
-
-    #[tokio::test]
     async fn test_sync_export_changeset_time_filtering() {
         let (db, _temp_dir) = create_test_db().await;
 
@@ -2844,58 +2352,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sync_import_changeset_success() {
-        let (db, _temp_dir) = create_test_db().await;
-
-        // Create initial data
-        let class = db
-            .create_class("5a".to_string(), "2023/24".to_string())
-            .await
-            .unwrap();
-        let student = db
-            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
-            .await
-            .unwrap();
-
-        // Create changeset with new data
-        let changeset_json = serde_json::json!({
-            "version": "1.0",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "source_device_id": "device_002",
-            "changeset": {
-                "classes": [{"id": 100, "name": "6b", "school_year": "2023/24"}],
-                "students": [{"id": 200, "class_id": 100, "first_name": "Anna", "last_name": "Test", "status": "active", "source_device_id": "device_002"}],
-                "observations": [{"id": 300, "student_id": 200, "author_id": 1, "category": "social", "text": "Imported observation", "tags": "[\"imported\"]", "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(), "source_device_id": "device_002"}]
-            },
-            "checksum": "test_checksum_123"
-        });
-
-        let changeset_data = changeset_json.to_string().into_bytes();
-
-        // Apply changeset
-        let result = db.apply_changeset_file(&changeset_data).await.unwrap();
-        assert!(result.contains("Successfully applied changeset"));
-
-        // Verify imported data
-        let classes = db.get_classes().await.unwrap();
-        assert_eq!(classes.len(), 2); // Original + imported
-
-        let students = db.get_students().await.unwrap();
-        assert_eq!(students.len(), 2); // Original + imported
-
-        let observations = db.search_observations(None, None, None).await.unwrap();
-        assert_eq!(observations.len(), 1); // Only imported (no observations in original)
-
-        // Find imported data
-        let imported_class = classes.iter().find(|c| c.name == "6b").unwrap();
-        assert_eq!(imported_class.id, 100);
-
-        let imported_student = students.iter().find(|s| s.first_name == "Anna").unwrap();
-        assert_eq!(imported_student.id, 200);
-        assert_eq!(imported_student.class_id, 100);
-    }
-
-    #[tokio::test]
     async fn test_sync_import_changeset_invalid_format() {
         let (db, _temp_dir) = create_test_db().await;
 
@@ -2915,34 +2371,6 @@ mod tests {
         let incomplete_data = incomplete_json.to_string().into_bytes();
         let result = db.apply_changeset_file(&incomplete_data).await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_sync_import_changeset_constraint_violations() {
-        let (db, _temp_dir) = create_test_db().await;
-
-        // Create changeset with invalid foreign key references
-        let changeset_json = serde_json::json!({
-            "version": "1.0",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "source_device_id": "device_002",
-            "changeset": {
-                "classes": [],
-                "students": [{"id": 200, "class_id": 999, "first_name": "Anna", "last_name": "Test", "status": "active", "source_device_id": "device_002"}], // Non-existent class_id
-                "observations": []
-            },
-            "checksum": "test_checksum_123"
-        });
-
-        let changeset_data = changeset_json.to_string().into_bytes();
-
-        // Apply changeset should handle constraint violations gracefully
-        let result = db.apply_changeset_file(&changeset_data).await;
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("FOREIGN KEY constraint"));
     }
 
     #[tokio::test]
@@ -2998,262 +2426,6 @@ mod tests {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(1);
         let filtered_observations = db.get_observations_since(cutoff).await.unwrap();
         assert_eq!(filtered_observations.len(), 2); // Both should be within 1 day
-    }
-
-    #[tokio::test]
-    async fn test_sync_full_backup_import_with_conflicts() {
-        let (db, _temp_dir) = create_test_db().await;
-
-        // Create initial data
-        let class = db
-            .create_class("5a".to_string(), "2023/24".to_string())
-            .await
-            .unwrap();
-        let student = db
-            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
-            .await
-            .unwrap();
-        let _observation = db
-            .create_observation(
-                student.id,
-                1,
-                "original".to_string(),
-                "Original observation".to_string(),
-                vec![],
-            )
-            .await
-            .unwrap();
-
-        // Create backup with conflicting IDs
-        let backup_json = serde_json::json!({
-            "format": "full_export",
-            "version": "1.0",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "export_scope": {
-                "total_students": 1,
-                "total_classes": 1,
-                "total_observations": 1
-            },
-            "source_device": {
-                "device_type": "test",
-                "device_name": "test-device"
-            },
-            "data": {
-                "classes": [{"id": class.id, "name": "5a_updated", "school_year": "2024/25"}], // Same ID, different data
-                "students": [{"id": student.id, "class_id": class.id, "first_name": "Max_Updated", "last_name": "Mustermann", "status": "active", "source_device_id": "backup-device"}], // Same ID, different data
-                "observations": [{"id": 999, "student_id": student.id, "author_id": 1, "category": "imported", "text": "Backup observation", "tags": "[\"backup\"]", "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(), "source_device_id": "backup-device"}]
-            }
-        });
-
-        let backup_data = backup_json.to_string().into_bytes();
-
-        // Import backup (should handle conflicts by updating existing records)
-        let result = db.import_full_backup(&backup_data).await.unwrap();
-        assert!(result.contains("Successfully imported"));
-
-        // Verify conflict resolution - existing records should be updated
-        let classes = db.get_classes().await.unwrap();
-        assert_eq!(classes.len(), 1);
-        assert_eq!(classes[0].name, "5a_updated"); // Updated name
-        assert_eq!(classes[0].school_year, "2024/25"); // Updated year
-
-        let students = db.get_students().await.unwrap();
-        assert_eq!(students.len(), 1);
-        assert_eq!(students[0].first_name, "Max_Updated"); // Updated name
-
-        let observations = db.search_observations(None, None, None).await.unwrap();
-        assert_eq!(observations.len(), 2); // Original + imported
-    }
-
-    #[tokio::test]
-    async fn test_sync_checksum_verification() {
-        let (db, _temp_dir) = create_test_db().await;
-
-        // Create test data
-        let class = db
-            .create_class("5a".to_string(), "2023/24".to_string())
-            .await
-            .unwrap();
-        let student = db
-            .create_student(class.id, "Max".to_string(), "Mustermann".to_string(), None)
-            .await
-            .unwrap();
-
-        // Export changeset to get checksum
-        let changeset1 = db.create_changeset_file(30).await.unwrap();
-        let changeset_data1: serde_json::Value =
-            serde_json::from_str(&String::from_utf8(changeset1).unwrap()).unwrap();
-        let checksum1 = changeset_data1["checksum"].as_str().unwrap();
-
-        // Export again immediately - checksum should be identical
-        let changeset2 = db.create_changeset_file(30).await.unwrap();
-        let changeset_data2: serde_json::Value =
-            serde_json::from_str(&String::from_utf8(changeset2).unwrap()).unwrap();
-        let checksum2 = changeset_data2["checksum"].as_str().unwrap();
-
-        assert_eq!(checksum1, checksum2);
-
-        // Add new observation
-        let _new_obs = db
-            .create_observation(
-                student.id,
-                1,
-                "new".to_string(),
-                "New observation".to_string(),
-                vec![],
-            )
-            .await
-            .unwrap();
-
-        // Export again - checksum should be different
-        let changeset3 = db.create_changeset_file(30).await.unwrap();
-        let changeset_data3: serde_json::Value =
-            serde_json::from_str(&String::from_utf8(changeset3).unwrap()).unwrap();
-        let checksum3 = changeset_data3["checksum"].as_str().unwrap();
-
-        assert_ne!(checksum1, checksum3);
-        assert!(!checksum3.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_sync_device_metadata_handling() {
-        let (db, _temp_dir) = create_test_db().await;
-
-        // Create data with specific device ID
-        let class = db
-            .create_class("5a".to_string(), "2023/24".to_string())
-            .await
-            .unwrap();
-        let student = db
-            .create_student(
-                class.id,
-                "Max".to_string(),
-                "Mustermann".to_string(),
-                Some("device_123".to_string()),
-            )
-            .await
-            .unwrap();
-
-        // Verify device ID is stored
-        assert_eq!(student.source_device_id, "device_123");
-
-        // Create changeset with device from other device
-        let changeset_json = serde_json::json!({
-            "version": "1.0",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "source_device_id": "device_456",
-            "changeset": {
-                "classes": [],
-                "students": [{"id": 999, "class_id": class.id, "first_name": "Remote", "last_name": "User", "status": "active", "source_device_id": "device_456"}],
-                "observations": []
-            },
-            "checksum": "test_checksum"
-        });
-
-        let changeset_data = changeset_json.to_string().into_bytes();
-        let _result = db.apply_changeset_file(&changeset_data).await.unwrap();
-
-        // Verify imported student has correct device ID
-        let students = db.get_students().await.unwrap();
-        let remote_student = students.iter().find(|s| s.first_name == "Remote").unwrap();
-        assert_eq!(remote_student.source_device_id, "device_456");
-    }
-
-    #[tokio::test]
-    async fn test_sync_large_dataset_performance() {
-        let (db, _temp_dir) = create_test_db().await;
-
-        // Create large dataset
-        let class = db
-            .create_class("Performance Test".to_string(), "2023/24".to_string())
-            .await
-            .unwrap();
-
-        // Create 50 students
-        let mut student_ids = Vec::new();
-        for i in 0..50 {
-            let student = db
-                .create_student(
-                    class.id,
-                    format!("Student{}", i),
-                    "Test".to_string(),
-                    Some(format!("device_{}", i % 5)),
-                )
-                .await
-                .unwrap();
-            student_ids.push(student.id);
-        }
-
-        // Create 100 observations
-        for i in 0..100 {
-            let student_id = student_ids[i % student_ids.len()];
-            let _obs = db
-                .create_observation(
-                    student_id,
-                    1,
-                    "performance".to_string(),
-                    format!("Performance test observation {}", i),
-                    vec![format!("tag{}", i % 10)],
-                )
-                .await
-                .unwrap();
-        }
-
-        // Test export performance
-        let start = std::time::Instant::now();
-        let changeset = db.create_changeset_file(365).await.unwrap();
-        let export_duration = start.elapsed();
-
-        // Verify export completed and contains expected data
-        let changeset_data: serde_json::Value =
-            serde_json::from_str(&String::from_utf8(changeset).unwrap()).unwrap();
-        assert_eq!(
-            changeset_data["changeset"]["students"]
-                .as_array()
-                .unwrap()
-                .len(),
-            50
-        );
-        assert_eq!(
-            changeset_data["changeset"]["classes"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            changeset_data["changeset"]["observations"]
-                .as_array()
-                .unwrap()
-                .len(),
-            100
-        );
-
-        // Export should complete in reasonable time (under 1 second for this size)
-        assert!(
-            export_duration.as_millis() < 1000,
-            "Export took too long: {:?}",
-            export_duration
-        );
-
-        // Test full export performance
-        let start = std::time::Instant::now();
-        let all_students = db.get_students().await.unwrap();
-        let all_classes = db.get_classes().await.unwrap();
-        let all_observations = db.search_observations(None, None, None).await.unwrap();
-        let full_export_duration = start.elapsed();
-
-        // Verify data integrity
-        assert_eq!(all_students.len(), 50);
-        assert_eq!(all_classes.len(), 1);
-        assert_eq!(all_observations.len(), 100);
-
-        // Full export should also be fast
-        assert!(
-            full_export_duration.as_millis() < 1000,
-            "Full export took too long: {:?}",
-            full_export_duration
-        );
     }
 
     // ---- update_observation and sync of edited observations ----
@@ -3325,7 +2497,7 @@ mod tests {
         let observation = create_test_observation(&device_a.0).await;
         device_b
             .0
-            .import_full_backup(&export_full_backup(&device_a.0).await)
+            .apply_changeset_file(&export_full_backup(&device_a.0).await)
             .await
             .unwrap();
 
@@ -3520,7 +2692,7 @@ mod tests {
         // Device B imports the changeset of device A
         let changeset = db_a.create_changeset_file(30).await.unwrap();
         let result = db_b.apply_changeset_file(&changeset).await.unwrap();
-        assert_eq!(result, "Successfully imported 1 observations");
+        assert_eq!(result, "0 neu, 1 aktualisiert, 0 gelöscht");
 
         let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
         assert_eq!(on_b.category, "academic");
@@ -3532,7 +2704,7 @@ mod tests {
 
         // Importing the same changeset again (WebDAV sync re-reads every file) is a no-op
         let result = db_b.apply_changeset_file(&changeset).await.unwrap();
-        assert_eq!(result, "Successfully imported 0 observations");
+        assert_eq!(result, "0 neu, 0 aktualisiert, 0 gelöscht");
         let observations = db_b.search_observations(None, None, None).await.unwrap();
         assert_eq!(observations.len(), 1);
     }
@@ -3567,7 +2739,7 @@ mod tests {
         // Neither older copy may replace the newer edit on device B
         for changeset in [&original_changeset, &older_changeset] {
             let result = db_b.apply_changeset_file(changeset).await.unwrap();
-            assert_eq!(result, "Successfully imported 0 observations");
+            assert_eq!(result, "0 neu, 0 aktualisiert, 0 gelöscht");
         }
         let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
         assert_eq!(on_b.category, "academic");
@@ -3578,7 +2750,7 @@ mod tests {
         // The newer edit wins on device A as well
         let newer_changeset = db_b.create_changeset_file(30).await.unwrap();
         let result = db_a.apply_changeset_file(&newer_changeset).await.unwrap();
-        assert_eq!(result, "Successfully imported 1 observations");
+        assert_eq!(result, "0 neu, 1 aktualisiert, 0 gelöscht");
         let on_a = db_a.get_observation(observation.id).await.unwrap().unwrap();
         assert_eq!(on_a.text, "Newer edit on device B");
         assert_eq!(on_a.updated_at, newer.updated_at);
@@ -3599,8 +2771,8 @@ mod tests {
             .await
             .unwrap();
         let backup_a = export_full_backup(&db_a).await;
-        let result = db_b.import_full_backup(&backup_a).await.unwrap();
-        assert!(result.contains("1 observations"));
+        let result = db_b.apply_changeset_file(&backup_a).await.unwrap();
+        assert!(result.starts_with("0 neu, 1 aktualisiert"), "{result}");
 
         let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
         assert_eq!(on_b.category, "academic");
@@ -3618,8 +2790,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let result = db_b.import_full_backup(&backup_a).await.unwrap();
-        assert!(result.contains("0 observations"));
+        let result = db_b.apply_changeset_file(&backup_a).await.unwrap();
+        assert!(result.starts_with("0 neu, 0 aktualisiert"), "{result}");
 
         let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
         assert_eq!(on_b.text, "Newer edit on device B");
@@ -3631,30 +2803,38 @@ mod tests {
         let (db, _temp_dir) = create_single_connection_test_db().await;
         let local = create_test_observation(&db).await;
         let later = chrono::Utc::now() + chrono::Duration::hours(1);
+        let student = db.get_students().await.unwrap().remove(0);
+        let class = db.get_classes().await.unwrap().remove(0);
 
-        // Another device assigned the same id to an observation of its own
+        // Anderes Gerät hat dieselbe Integer-ID vergeben (ohne uuid: abgeleitet aus Gerät+ID+Zeit)
         let mut other_device = serde_json::to_value(&local).unwrap();
+        other_device.as_object_mut().unwrap().remove("uuid");
         other_device["source_device_id"] = serde_json::json!("other-device");
         other_device["text"] = serde_json::json!("Observation of another device");
         other_device["updated_at"] = serde_json::json!(later);
 
-        // Same device and id, but created at another time (e.g. a different database file)
+        // Gleiches Gerät und ID, aber anderer Erstellzeitpunkt (z. B. andere Datenbankdatei)
         let mut other_creation = serde_json::to_value(&local).unwrap();
+        other_creation.as_object_mut().unwrap().remove("uuid");
         other_creation["created_at"] =
             serde_json::json!(local.created_at - chrono::Duration::days(1));
         other_creation["text"] = serde_json::json!("Observation of another database");
         other_creation["updated_at"] = serde_json::json!(later);
 
         let backup = serde_json::json!({
-            "data": { "observations": [other_device, other_creation] }
+            "format": "full_export",
+            "data": { "classes": [class], "students": [student],
+                      "observations": [other_device, other_creation] }
         })
         .to_string();
-        let result = db.import_full_backup(backup.as_bytes()).await.unwrap();
-        assert!(result.contains("0 observations"));
+        let result = db.apply_changeset_file(backup.as_bytes()).await.unwrap();
+        // Die UUID bestimmt die Identität: zwei fremde Beobachtungen kommen neu hinzu.
+        assert_eq!(result, "2 neu, 0 aktualisiert, 0 gelöscht");
 
         let stored = db.get_observation(local.id).await.unwrap().unwrap();
         assert_eq!(stored.text, "Original observation");
         assert_eq!(stored.updated_at, local.updated_at);
+        assert_eq!(db.search_observations(None, None, None).await.unwrap().len(), 3);
     }
 
     // ============================================
@@ -4346,13 +3526,18 @@ zweite Zeile', '[]', '2025-09-05 12:00:00', '2025-09-05T12:00:00Z', 'desktop-B')
                         "source_device_id": "laptop-A"}]
                 }
             });
-            db.import_full_backup(backup.to_string().as_bytes()).await.unwrap();
+            db.apply_changeset_file(backup.to_string().as_bytes()).await.unwrap();
 
-            let obs = db.get_observation(9).await.unwrap().unwrap();
-            assert_eq!(obs.uuid, "11111111-1111-4111-8111-111111111111");
-            assert_eq!(obs.modified_by_device, "laptop-B");
+            // Importierte Zeilen bekommen lokale IDs; Identität ist die UUID.
+            let obs: (String, String) = sqlx::query_as(
+                "SELECT uuid, modified_by_device FROM observations WHERE uuid = '11111111-1111-4111-8111-111111111111'",
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(obs.1, "laptop-B");
             let classes = db.get_classes().await.unwrap();
-            let class = classes.iter().find(|c| c.id == 7).unwrap();
+            let class = classes.iter().find(|c| c.name == "7a").unwrap();
             assert_eq!(
                 class.uuid,
                 derived_uuid("classes", "laptop-A", 7, "2025-01-01T08:00:00.000Z")
@@ -4362,8 +3547,11 @@ zweite Zeile', '[]', '2025-09-05 12:00:00', '2025-09-05T12:00:00Z', 'desktop-B')
             assert!(!students[0].uuid.is_empty());
             let cats = db.get_categories().await.unwrap();
             let imported = cats.iter().find(|c| c.name == "Importiert").unwrap();
-            assert!(!imported.uuid.is_empty());
-            assert_eq!(imported.modified_by_device, db.crypto.get_device_id());
+            assert_eq!(
+                imported.uuid,
+                derived_uuid("categories", "laptop-A", 1, "2025-01-01T08:00:00.000Z")
+            );
+            assert_eq!(imported.modified_by_device, "laptop-A");
             let missing: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM categories WHERE uuid IS NULL OR uuid = '' OR modified_by_device = ''",
             )
