@@ -1874,6 +1874,100 @@ impl Database {
 
         Ok(())
     }
+
+    /// Alle Zeilen für die Gesamtstand-Datei (Snapshot), einschließlich Löschvermerken
+    /// (`deleted_at` wird bewusst nicht gefiltert). Verweise werden als UUID aufgelöst.
+    pub async fn all_rows_for_snapshot(&self) -> Result<crate::snapshot::SnapshotRows> {
+        use crate::snapshot::{CategoryRec, ClassRec, ObservationRec, SnapshotRows, StudentRec};
+        use std::collections::HashMap;
+
+        let classes = sqlx::query_as::<_, Class>("SELECT * FROM classes")
+            .fetch_all(&self.pool)
+            .await?;
+        let students = sqlx::query_as::<_, Student>("SELECT * FROM students")
+            .fetch_all(&self.pool)
+            .await?;
+        let categories = sqlx::query_as::<_, Category>("SELECT * FROM categories")
+            .fetch_all(&self.pool)
+            .await?;
+        let observations = sqlx::query_as::<_, Observation>("SELECT * FROM observations")
+            .fetch_all(&self.pool)
+            .await?;
+
+        let class_uuids: HashMap<i64, String> =
+            classes.iter().map(|c| (c.id, c.uuid.clone())).collect();
+        let student_uuids: HashMap<i64, String> =
+            students.iter().map(|s| (s.id, s.uuid.clone())).collect();
+
+        Ok(SnapshotRows {
+            categories: categories
+                .into_iter()
+                .map(|c| CategoryRec {
+                    uuid: c.uuid,
+                    name: c.name,
+                    color: c.color,
+                    background_color: c.background_color,
+                    text_color: c.text_color,
+                    is_active: c.is_active,
+                    sort_order: c.sort_order,
+                    created_at: format_ts(c.created_at),
+                    updated_at: format_ts(c.updated_at),
+                    deleted_at: c.deleted_at,
+                    modified_by_device: c.modified_by_device,
+                    source_device_id: c.source_device_id,
+                })
+                .collect(),
+            classes: classes
+                .into_iter()
+                .map(|c| ClassRec {
+                    uuid: c.uuid,
+                    name: c.name,
+                    school_year: c.school_year,
+                    created_at: format_ts(c.created_at),
+                    updated_at: format_ts(c.updated_at),
+                    deleted_at: c.deleted_at,
+                    modified_by_device: c.modified_by_device,
+                    source_device_id: c.source_device_id,
+                })
+                .collect(),
+            students: students
+                .into_iter()
+                .filter_map(|s| {
+                    let class_uuid = class_uuids.get(&s.class_id)?.clone();
+                    Some(StudentRec {
+                        uuid: s.uuid,
+                        class_uuid,
+                        first_name: s.first_name,
+                        last_name: s.last_name,
+                        status: s.status,
+                        created_at: format_ts(s.created_at),
+                        updated_at: format_ts(s.updated_at),
+                        deleted_at: s.deleted_at,
+                        modified_by_device: s.modified_by_device,
+                        source_device_id: s.source_device_id,
+                    })
+                })
+                .collect(),
+            observations: observations
+                .into_iter()
+                .filter_map(|o| {
+                    let student_uuid = student_uuids.get(&o.student_id)?.clone();
+                    Some(ObservationRec {
+                        uuid: o.uuid,
+                        student_uuid,
+                        category: o.category,
+                        text: o.text,
+                        tags: o.tags,
+                        created_at: format_ts(o.created_at),
+                        updated_at: format_ts(o.updated_at),
+                        deleted_at: o.deleted_at,
+                        modified_by_device: o.modified_by_device,
+                        source_device_id: o.source_device_id,
+                    })
+                })
+                .collect(),
+        })
+    }
 }
 
 #[cfg(test)]
