@@ -12,6 +12,7 @@ mod snapshot;
 mod merge;
 mod legacy_import;
 mod sync_schema;
+mod sync_engine;
 
 #[cfg(test)]
 mod tests;
@@ -305,11 +306,8 @@ async fn build_export_bytes(state: &AppState) -> Result<Vec<u8>, String> {
         .get_device_config()
         .map_err(|e| e.to_string())?;
     let db = state.db.lock().await;
-    let snap = snapshot::build_snapshot(
-        &db,
-        config.get("device_type").cloned(),
-        config.get("device_name").cloned(),
-    )
+    let role = db.get_device_role().await.map_err(|e| e.to_string())?;
+    let snap = snapshot::build_snapshot(&db, role, config.get("device_name").cloned())
     .await
     .map_err(|e| e.to_string())?;
     Ok(snapshot::encode(&snap))
@@ -376,7 +374,7 @@ async fn import_changeset(
 ) -> Result<(), String> {
     let changeset = base64::prelude::BASE64_STANDARD
         .decode(&changeset_data)
-        .map_err(|e| format!("Invalid changeset format: {}", e))?;
+        .map_err(|e| format!("Ungültiges Dateiformat: {}", e))?;
 
     import_bytes_with_audit(&state, &changeset).await?;
 
@@ -395,7 +393,7 @@ async fn import_changeset_from_file(
     file_path: String,
 ) -> Result<String, String> {
     let changeset_data =
-        std::fs::read(&file_path).map_err(|e| format!("Failed to read changeset file: {}", e))?;
+        std::fs::read(&file_path).map_err(|e| format!("Datei konnte nicht gelesen werden: {}", e))?;
 
     let import_result = import_bytes_with_audit(&state, &changeset_data).await?;
 
@@ -405,10 +403,7 @@ async fn import_changeset_from_file(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(format!(
-        "Imported changeset from {}: {}",
-        file_path, import_result
-    ))
+    Ok(format!("Datei {} eingelesen: {}", file_path, import_result))
 }
 
 /// Sicherung: vollständiger Gesamtstand (`snapshot_v2`) als Text. `days_back` wird ignoriert.
@@ -434,7 +429,8 @@ async fn import_full_backup(
     state: tauri::State<'_, AppState>,
     file_path: String,
 ) -> Result<String, String> {
-    let backup_data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
+    let backup_data = std::fs::read(&file_path)
+        .map_err(|e| format!("Sicherung konnte nicht gelesen werden: {}", e))?;
 
     let import_result = import_bytes_with_audit(&state, &backup_data).await?;
 
@@ -444,10 +440,7 @@ async fn import_full_backup(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(format!(
-        "Imported full backup from {}: {}",
-        file_path, import_result
-    ))
+    Ok(format!("Sicherung {} eingespielt: {}", file_path, import_result))
 }
 
 #[tauri::command]
@@ -463,7 +456,7 @@ async fn import_changeset_data(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(format!("Imported changeset data: {}", import_result))
+    Ok(format!("Daten eingelesen: {}", import_result))
 }
 
 #[tauri::command]
@@ -479,7 +472,7 @@ async fn import_full_backup_data(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(format!("Imported full backup data: {}", import_result))
+    Ok(format!("Sicherung eingespielt: {}", import_result))
 }
 
 #[tauri::command]
@@ -943,6 +936,22 @@ async fn set_database_path(app: tauri::AppHandle, new_path: String) -> Result<()
 // WebDAV Sync Commands
 // ============================================
 
+/// Aktiver Sync-Manager (Sperre auf `webdav_sync` nur kurz, nie während eines Abgleichs).
+async fn current_sync_manager(state: &AppState) -> Option<Arc<webdav_sync::WebDavSyncManager>> {
+    state.webdav_sync.lock().await.clone()
+}
+
+/// Setzt den Sync-Manager; ein vorheriger beendet seine Hintergrund-Schleife.
+async fn install_sync_manager(
+    state: &AppState,
+    manager: Option<Arc<webdav_sync::WebDavSyncManager>>,
+) {
+    let old = std::mem::replace(&mut *state.webdav_sync.lock().await, manager);
+    if let Some(old) = old {
+        old.stop();
+    }
+}
+
 #[tauri::command]
 async fn configure_webdav(
     state: tauri::State<'_, AppState>,
@@ -950,107 +959,29 @@ async fn configure_webdav(
     username: String,
     password: String,
 ) -> Result<String, String> {
-    let db = state.db.lock().await;
-
     // Store credentials in database (encrypted)
-    db.store_webdav_credentials(url.clone(), username.clone(), password.clone())
+    state
+        .db
+        .lock()
+        .await
+        .store_webdav_credentials(url.clone(), username.clone(), password.clone())
         .await
         .map_err(|e| e.to_string())?;
 
-    // Initialize WebDAV sync manager
-    let device_id = db.get_device_id();
-    drop(db); // Release lock
-
-    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new(device_id));
+    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new());
     sync_manager
         .configure(url, username, password)
         .await
         .map_err(|e| e.to_string())?;
+    install_sync_manager(&state, Some(sync_manager.clone())).await;
 
-    // Store sync manager in state
-    let mut webdav_sync = state.webdav_sync.lock().await;
-    *webdav_sync = Some(sync_manager.clone());
-
-    // Start background sync task
-    let state_clone_export = state.inner().clone();
-    let state_clone_import = state.inner().clone();
-    sync_manager.clone().start_background_sync(
-        move || {
-            // Export changeset function
-            let state = state_clone_export.clone();
-            async move {
-                let db = state.db.lock().await;
-                match db.create_changeset_file(30).await {
-                    Ok(data) => Ok(data),
-                    Err(e) => {
-                        eprintln!("Failed to export changeset: {}", e);
-                        Ok(vec![]) // Return empty on error to avoid breaking sync
-                    }
-                }
-            }
-        },
-        move |data| {
-            // Import changeset function
-            let state = state_clone_import.clone();
-            async move {
-                if data.is_empty() {
-                    return Ok(()); // Skip empty data
-                }
-                let db = state.db.lock().await;
-                match db.apply_changeset_file(&data).await {
-                    Ok(_) => {
-                        println!("✅ Successfully imported changeset");
-                        Ok(())
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️ Failed to import changeset: {}", e);
-                        Ok(()) // Don't fail sync on import errors
-                    }
-                }
-            }
-        },
-    );
-
-    // Perform initial sync
-    let state_clone2 = state.inner().clone();
-    let state_clone3 = state.inner().clone();
+    // Erster Abgleich sofort, danach alle 3 Minuten
     sync_manager
-        .sync_on_startup(
-            move || {
-                let state = state_clone2.clone();
-                async move {
-                    let db = state.db.lock().await;
-                    match db.create_changeset_file(30).await {
-                        Ok(data) => Ok(data),
-                        Err(e) => {
-                            eprintln!("Failed to export changeset on startup: {}", e);
-                            Ok(vec![])
-                        }
-                    }
-                }
-            },
-            move |data| {
-                let state = state_clone3.clone();
-                async move {
-                    if data.is_empty() {
-                        return Ok(());
-                    }
-                    let db = state.db.lock().await;
-                    match db.apply_changeset_file(&data).await {
-                        Ok(_) => {
-                            println!("✅ Initial sync: imported changeset");
-                            Ok(())
-                        }
-                        Err(e) => {
-                            eprintln!("⚠️ Initial sync: failed to import: {}", e);
-                            Ok(())
-                        }
-                    }
-                }
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        .sync_logged(&state.db, Some(&state.audit), "Einrichtung")
+        .await;
+    sync_manager
+        .clone()
+        .start_background_sync(state.db.clone(), state.audit.clone());
 
     Ok("WebDAV configured successfully".to_string())
 }
@@ -1066,89 +997,86 @@ async fn test_webdav_connection(
 }
 
 #[tauri::command]
-async fn trigger_manual_sync(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let webdav_sync = state.webdav_sync.lock().await;
+async fn trigger_manual_sync(
+    state: tauri::State<'_, AppState>,
+) -> Result<sync_engine::SyncOutcome, String> {
+    let manager = current_sync_manager(&state)
+        .await
+        .ok_or_else(|| "WebDAV ist nicht eingerichtet".to_string())?;
+    manager
+        .sync_now(&state.db, Some(&state.audit))
+        .await
+        .map_err(|e| format!("Abgleich fehlgeschlagen: {:#}", e))
+}
 
-    if let Some(sync_manager) = webdav_sync.as_ref() {
-        let state_clone = state.inner().clone();
-        let state_clone2 = state.inner().clone();
+#[tauri::command]
+async fn get_device_role(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
+    state
+        .db
+        .lock()
+        .await
+        .get_device_role()
+        .await
+        .map_err(|e| e.to_string())
+}
 
-        sync_manager
-            .sync_on_startup(
-                move || {
-                    let state = state_clone.clone();
-                    async move {
-                        let db = state.db.lock().await;
-                        match db.create_changeset_file(30).await {
-                            Ok(data) => Ok(data),
-                            Err(e) => {
-                                eprintln!("Manual sync: failed to export: {}", e);
-                                Ok(vec![])
-                            }
-                        }
-                    }
-                },
-                move |data| {
-                    let state = state_clone2.clone();
-                    async move {
-                        if data.is_empty() {
-                            return Ok(());
-                        }
-                        let db = state.db.lock().await;
-                        match db.apply_changeset_file(&data).await {
-                            Ok(_) => {
-                                println!("✅ Manual sync: imported changeset");
-                                Ok(())
-                            }
-                            Err(e) => {
-                                eprintln!("⚠️ Manual sync: failed to import: {}", e);
-                                Ok(())
-                            }
-                        }
-                    }
-                },
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+#[tauri::command]
+async fn set_device_role(state: tauri::State<'_, AppState>, role: String) -> Result<(), String> {
+    state
+        .db
+        .lock()
+        .await
+        .set_device_role(&role)
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .audit
+        .log_action(
+            "update",
+            "device_role",
+            0,
+            1,
+            Some(&serde_json::json!({ "role": role }).to_string()),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
-        Ok("Sync completed successfully".to_string())
-    } else {
-        Err("WebDAV not configured".to_string())
-    }
+#[tauri::command]
+async fn get_device_role_suggestion(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let config = state
+        .crypto
+        .get_device_config()
+        .map_err(|e| e.to_string())?;
+    Ok(sync_engine::role_suggestion(config.get("device_type").map(|s| s.as_str())).to_string())
 }
 
 #[tauri::command]
 async fn get_webdav_sync_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    // Die Datenbank-Sperre wird vor dem Sync-Manager wieder freigegeben: Ein laufender
-    // Abgleich hält den Sync-Manager und wartet auf die Datenbank.
-    let (credentials, stored_last_sync) = {
+    // Datenbank-Sperre vor dem Sync-Manager wieder freigeben (Sperr-Reihenfolge).
+    let (credentials, stored_last_sync, clock_offset_ms, device_role, first_sync_done) = {
         let db = state.db.lock().await;
-        let credentials = db
-            .get_webdav_credentials()
-            .await
-            .map_err(|e| e.to_string())?;
-        let stored_last_sync = db
-            .get_last_sync_timestamp()
-            .await
-            .map_err(|e| e.to_string())?;
-        (credentials, stored_last_sync)
+        (
+            db.get_webdav_credentials().await.map_err(|e| e.to_string())?,
+            db.get_last_sync_timestamp().await.map_err(|e| e.to_string())?,
+            db.clock_offset_ms(),
+            db.get_device_role().await.map_err(|e| e.to_string())?,
+            db.is_first_sync_done().await.map_err(|e| e.to_string())?,
+        )
     };
     let is_configured = credentials.is_some();
 
-    // Check if sync manager is active; it records the time of its last successful sync.
-    let (is_active, manager_last_sync) = match state.webdav_sync.try_lock() {
-        Ok(webdav_sync) => match webdav_sync.as_ref() {
-            Some(manager) => (true, manager.get_last_sync().await),
-            None => (false, None),
-        },
-        // Ein Abgleich läuft gerade; der Manager ist also aktiv.
-        Err(_) => (true, None),
-    };
-    let last_sync = manager_last_sync
+    let manager = current_sync_manager(&state).await;
+    let is_active = manager.is_some();
+    let last_sync = manager
+        .as_ref()
+        .and_then(|m| m.get_last_sync())
         .map(|t| t.to_rfc3339())
         .or(stored_last_sync);
+    let last_outcome = manager.as_ref().and_then(|m| m.get_last_outcome());
 
     Ok(serde_json::json!({
         "configured": is_configured,
@@ -1156,15 +1084,16 @@ async fn get_webdav_sync_status(
         "last_sync": last_sync,
         "url": credentials.as_ref().map(|(url, _, _)| url.clone()),
         "username": credentials.as_ref().map(|(_, username, _)| username.clone()),
+        "clock_offset_ms": clock_offset_ms,
+        "device_role": device_role,
+        "first_sync_done": first_sync_done,
+        "last_outcome": last_outcome,
     }))
 }
 
 #[tauri::command]
 async fn disable_webdav_sync(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    // Clear sync manager
-    let mut webdav_sync = state.webdav_sync.lock().await;
-    *webdav_sync = None;
-
+    install_sync_manager(&state, None).await;
     Ok(())
 }
 
@@ -1230,66 +1159,24 @@ fn main() {
 
             app.manage(state.clone());
 
-            // Initialize WebDAV sync if configured
+            // WebDAV-Abgleich einrichten, falls Zugangsdaten gespeichert sind:
+            // Abgleich beim Start, danach alle 3 Minuten.
             tauri::async_runtime::spawn(async move {
-                let db_lock = state.db.lock().await;
-                if let Ok(Some((url, username, password))) = db_lock.get_webdav_credentials().await
-                {
-                    let device_id = db_lock.get_device_id();
-                    drop(db_lock);
-
-                    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new(device_id));
-                    if sync_manager
-                        .configure(url, username, password)
-                        .await
-                        .is_ok()
-                    {
-                        let mut webdav_sync = state.webdav_sync.lock().await;
-                        *webdav_sync = Some(sync_manager.clone());
-                        drop(webdav_sync);
-
-                        println!("✅ WebDAV sync initialized from stored credentials");
-
-                        // Start background sync task
-                        let state_clone_export = state.clone();
-                        let state_clone_import = state.clone();
-                        
-                        sync_manager.clone().start_background_sync(
-                            move || {
-                                let state = state_clone_export.clone();
-                                async move {
-                                    let db = state.db.lock().await;
-                                    match db.create_changeset_file(30).await {
-                                        Ok(data) => Ok(data),
-                                        Err(e) => {
-                                            eprintln!("Background sync: failed to export: {}", e);
-                                            Ok(vec![])
-                                        }
-                                    }
-                                }
-                            },
-                            move |data| {
-                                let state = state_clone_import.clone();
-                                async move {
-                                    if data.is_empty() {
-                                        return Ok(());
-                                    }
-                                    let db = state.db.lock().await;
-                                    match db.apply_changeset_file(&data).await {
-                                        Ok(_) => {
-                                            println!("✅ Background sync: imported changeset");
-                                            Ok(())
-                                        }
-                                        Err(e) => {
-                                            eprintln!("⚠️ Background sync: failed to import: {}", e);
-                                            Ok(())
-                                        }
-                                    }
-                                }
-                            },
-                        );
-                        
-                        println!("✅ WebDAV background sync task started");
+                let credentials = state.db.lock().await.get_webdav_credentials().await;
+                if let Ok(Some((url, username, password))) = credentials {
+                    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new());
+                    match sync_manager.configure(url, username, password).await {
+                        Ok(()) => {
+                            install_sync_manager(&state, Some(sync_manager.clone())).await;
+                            println!("WebDAV-Abgleich aus gespeicherten Zugangsdaten eingerichtet");
+                            sync_manager
+                                .sync_logged(&state.db, Some(&state.audit), "Start")
+                                .await;
+                            sync_manager
+                                .clone()
+                                .start_background_sync(state.db.clone(), state.audit.clone());
+                        }
+                        Err(e) => eprintln!("WebDAV nicht erreichbar, kein Abgleich: {:#}", e),
                     }
                 }
             });
@@ -1300,33 +1187,13 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let app_handle = window.app_handle();
                 
-                // Try to get the state and perform shutdown sync
+                // Abgleich beim Beenden
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     tauri::async_runtime::block_on(async {
-                        let webdav_sync = state.webdav_sync.lock().await;
-                        
-                        if let Some(sync_manager) = webdav_sync.as_ref() {
-                            let state_clone = state.inner().clone();
-                            
-                            let result = sync_manager
-                                .sync_on_shutdown(move || {
-                                    let state = state_clone.clone();
-                                    async move {
-                                        let db = state.db.lock().await;
-                                        match db.create_changeset_file(30).await {
-                                            Ok(data) => Ok(data),
-                                            Err(e) => {
-                                                eprintln!("Shutdown sync: failed to export: {}", e);
-                                                Ok(vec![])
-                                            }
-                                        }
-                                    }
-                                })
+                        if let Some(sync_manager) = current_sync_manager(&state).await {
+                            sync_manager
+                                .sync_logged(&state.db, Some(&state.audit), "Beenden")
                                 .await;
-                            
-                            if let Err(e) = result {
-                                eprintln!("⚠️ Shutdown sync failed: {}", e);
-                            }
                         }
                     });
                 }
@@ -1378,7 +1245,10 @@ fn main() {
             test_webdav_connection,
             trigger_manual_sync,
             get_webdav_sync_status,
-            disable_webdav_sync
+            disable_webdav_sync,
+            get_device_role,
+            set_device_role,
+            get_device_role_suggestion
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,10 +1,14 @@
+use crate::audit::AuditLogger;
+use crate::database::Database;
+use crate::sync_engine::{run_sync, SyncOutcome};
 use crate::sync_time::offset_from_date_header;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
+use tokio::time::{interval_at, Duration, Instant};
 
 /// Antwort eines WebDAV-Aufrufs samt gemessenem Versatz zur Serverzeit (ms),
 /// sofern die Antwort einen `Date`-Header hatte.
@@ -274,19 +278,33 @@ impl WebDavClient {
     }
 }
 
-/// Sync manager for bidirectional WebDAV synchronization
+/// Hält die WebDAV-Verbindung und löst Abgleiche aus (Start, alle 3 Minuten, Beenden,
+/// manuell). Jeder Abgleich läuft über `sync_engine::run_sync`; Abgleiche laufen nie parallel.
+///
+/// Sperr-Reihenfolge: `run_lock` → Datenbank. Die Datenbank wird in `run_sync` nur kurz für
+/// reine DB-Schritte gesperrt; niemand hält die Datenbank und wartet auf `run_lock`.
 pub struct WebDavSyncManager {
-    webdav_client: Arc<Mutex<Option<WebDavClient>>>,
-    device_id: String,
-    last_sync: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
+    client: std::sync::Mutex<Option<Arc<WebDavClient>>>,
+    run_lock: Mutex<()>,
+    stopped: AtomicBool,
+    last_sync: std::sync::Mutex<Option<DateTime<Utc>>>,
+    last_outcome: std::sync::Mutex<Option<String>>,
+}
+
+impl Default for WebDavSyncManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WebDavSyncManager {
-    pub fn new(device_id: String) -> Self {
+    pub fn new() -> Self {
         Self {
-            webdav_client: Arc::new(Mutex::new(None)),
-            device_id,
-            last_sync: Arc::new(Mutex::new(None)),
+            client: std::sync::Mutex::new(None),
+            run_lock: Mutex::new(()),
+            stopped: AtomicBool::new(false),
+            last_sync: std::sync::Mutex::new(None),
+            last_outcome: std::sync::Mutex::new(None),
         }
     }
 
@@ -304,227 +322,83 @@ impl WebDavSyncManager {
             return Err(anyhow::anyhow!("WebDAV connection test failed"));
         }
 
-        let mut webdav_client = self.webdav_client.lock().await;
-        *webdav_client = Some(client);
-
+        *self.client.lock().unwrap() = Some(Arc::new(client));
         Ok(())
     }
 
     /// Check if WebDAV is configured
-    pub async fn is_configured(&self) -> bool {
-        self.webdav_client.lock().await.is_some()
+    pub fn is_configured(&self) -> bool {
+        self.client.lock().unwrap().is_some()
     }
 
-    /// Sync on app startup
-    pub async fn sync_on_startup<ExportFut, ImportFut>(
+    /// Beendet die Hintergrund-Schleife (bei Neukonfiguration oder Abschalten).
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    /// Ein Abgleich; Ergebnis wird als `last_outcome` (bzw. Zeitpunkt) gemerkt.
+    pub async fn sync_now(
         &self,
-        export_changeset_fn: impl Fn() -> ExportFut,
-        import_changeset_fn: impl Fn(Vec<u8>) -> ImportFut,
-    ) -> Result<()>
-    where
-        ExportFut: std::future::Future<Output = Result<Vec<u8>>>,
-        ImportFut: std::future::Future<Output = Result<()>>,
-    {
-        if !self.is_configured().await {
-            println!("WebDAV not configured, skipping startup sync");
-            return Ok(());
+        db: &Mutex<Database>,
+        audit: Option<&AuditLogger>,
+    ) -> Result<SyncOutcome> {
+        let client = self
+            .client
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("WebDAV ist nicht eingerichtet"))?;
+        let _running = self.run_lock.lock().await;
+        let result = run_sync(db, &client, audit).await;
+        match &result {
+            Ok(outcome) => {
+                *self.last_outcome.lock().unwrap() = Some(outcome.as_str().to_string());
+                if matches!(outcome, SyncOutcome::Synced(_)) {
+                    *self.last_sync.lock().unwrap() = Some(Utc::now());
+                }
+            }
+            Err(_) => *self.last_outcome.lock().unwrap() = Some("error".to_string()),
         }
-
-        println!("🔄 Starting synchronization on app startup...");
-
-        // Import from WebDAV
-        self.sync_from_webdav(import_changeset_fn).await?;
-
-        // Export to WebDAV
-        self.sync_to_webdav(export_changeset_fn).await?;
-
-        println!("✅ Startup synchronization completed");
-        Ok(())
+        result
     }
 
-    /// Start background sync task (every 3 minutes)
-    pub fn start_background_sync<ExportFn, ImportFn, ExportFut, ImportFut>(
+    /// Abgleich mit Protokollausgabe; Fehler werden nur protokolliert.
+    pub async fn sync_logged(&self, db: &Mutex<Database>, audit: Option<&AuditLogger>, what: &str) {
+        match self.sync_now(db, audit).await {
+            Ok(outcome) => println!("Abgleich ({}): {}", what, outcome.as_str()),
+            Err(e) => eprintln!("Abgleich ({}) fehlgeschlagen: {:#}", what, e),
+        }
+    }
+
+    /// Hintergrund-Abgleich alle 3 Minuten (erster Lauf nach 3 Minuten).
+    pub fn start_background_sync(
         self: Arc<Self>,
-        export_changeset_fn: ExportFn,
-        import_changeset_fn: ImportFn,
-    )
-    where
-        ExportFn: Fn() -> ExportFut + Send + Sync + 'static,
-        ImportFn: Fn(Vec<u8>) -> ImportFut + Send + Sync + 'static,
-        ExportFut: std::future::Future<Output = Result<Vec<u8>>> + Send,
-        ImportFut: std::future::Future<Output = Result<()>> + Send,
-    {
+        db: Arc<Mutex<Database>>,
+        audit: Arc<AuditLogger>,
+    ) {
         tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(180)); // 3 minutes
-
+            let period = Duration::from_secs(180);
+            let mut ticker = interval_at(Instant::now() + period, period);
             loop {
-                interval.tick().await;
-
-                if !self.is_configured().await {
-                    continue;
+                ticker.tick().await;
+                if self.stopped.load(Ordering::SeqCst) {
+                    break;
                 }
-
-                match self
-                    .sync_bidirectional(&export_changeset_fn, &import_changeset_fn)
-                    .await
-                {
-                    Ok(_) => println!("✅ Background sync successful"),
-                    Err(e) => eprintln!("⚠️ Background sync error: {}", e),
+                if self.is_configured() {
+                    self.sync_logged(&db, Some(&audit), "Hintergrund").await;
                 }
             }
         });
     }
 
-    /// Sync on app shutdown
-    pub async fn sync_on_shutdown<ExportFut>(
-        &self,
-        export_changeset_fn: impl Fn() -> ExportFut,
-    ) -> Result<()>
-    where
-        ExportFut: std::future::Future<Output = Result<Vec<u8>>>,
-    {
-        if !self.is_configured().await {
-            println!("WebDAV not configured, skipping shutdown sync");
-            return Ok(());
-        }
-
-        println!("🔄 Final synchronization before shutdown...");
-        self.sync_to_webdav(export_changeset_fn).await?;
-        println!("✅ Shutdown sync completed");
-        Ok(())
+    /// Zeitpunkt des letzten erfolgreichen Abgleichs in dieser Sitzung.
+    pub fn get_last_sync(&self) -> Option<DateTime<Utc>> {
+        *self.last_sync.lock().unwrap()
     }
 
-    /// Bidirectional sync
-    async fn sync_bidirectional<ExportFn, ImportFn, ExportFut, ImportFut>(
-        &self,
-        export_changeset_fn: &ExportFn,
-        import_changeset_fn: &ImportFn,
-    ) -> Result<()>
-    where
-        ExportFn: Fn() -> ExportFut + Sync,
-        ImportFn: Fn(Vec<u8>) -> ImportFut + Sync,
-        ExportFut: std::future::Future<Output = Result<Vec<u8>>>,
-        ImportFut: std::future::Future<Output = Result<()>>,
-    {
-        // Import from WebDAV
-        self.sync_from_webdav(import_changeset_fn).await?;
-
-        // Export to WebDAV
-        self.sync_to_webdav(export_changeset_fn).await?;
-
-        // Update last sync timestamp
-        let mut last_sync = self.last_sync.lock().await;
-        *last_sync = Some(chrono::Utc::now());
-
-        Ok(())
-    }
-
-    /// Import changesets from WebDAV
-    async fn sync_from_webdav<ImportFn, ImportFut>(
-        &self,
-        import_changeset_fn: ImportFn,
-    ) -> Result<()>
-    where
-        ImportFn: Fn(Vec<u8>) -> ImportFut,
-        ImportFut: std::future::Future<Output = Result<()>>,
-    {
-        let webdav_client_guard = self.webdav_client.lock().await;
-        let webdav_client = webdav_client_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("WebDAV not configured"))?;
-
-        // List all files on WebDAV
-        let files: Vec<String> = webdav_client
-            .list_entries()
-            .await?
-            .value
-            .into_iter()
-            .map(|e| e.name)
-            .filter(|n| n.starts_with("changeset_"))
-            .collect();
-
-        let mut imported_count = 0;
-        println!("🔑 Current device ID: {}", self.device_id);
-        println!("📂 Found {} file(s) on WebDAV to process", files.len());
-
-        for filename in files {
-            println!("📄 Processing: {}", filename);
-            // Skip our own changesets
-            if filename.contains(&self.device_id) {
-                println!("  ⏭️ Skipping own changeset: {}", filename);
-                continue;
-            }
-            println!("  📥 Will attempt to import: {}", filename);
-
-            // Download and import changeset
-            match webdav_client.download(&filename).await.map(|r| r.value) {
-                Ok(data) => {
-                    match import_changeset_fn(data).await {
-                        Ok(_) => {
-                            println!("✅ Imported: {}", filename);
-                            imported_count += 1;
-
-                            // Optionally delete imported changeset to keep WebDAV clean
-                            // let _ = webdav_client.delete_file(&filename).await;
-                        }
-                        Err(e) => {
-                            eprintln!("⚠️ Failed to import {}: {}", filename, e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("⚠️ Failed to download {}: {}", filename, e);
-                }
-            }
-        }
-
-        if imported_count > 0 {
-            println!("📥 Imported {} changeset(s) from WebDAV", imported_count);
-        } else {
-            println!("ℹ️ No new changesets to import from WebDAV");
-        }
-
-        Ok(())
-    }
-
-    /// Export changesets to WebDAV
-    async fn sync_to_webdav<ExportFn, ExportFut>(
-        &self,
-        export_changeset_fn: ExportFn,
-    ) -> Result<()>
-    where
-        ExportFn: Fn() -> ExportFut,
-        ExportFut: std::future::Future<Output = Result<Vec<u8>>>,
-    {
-        let webdav_client_guard = self.webdav_client.lock().await;
-        let webdav_client = webdav_client_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("WebDAV not configured"))?;
-
-        // Export local changeset
-        let changeset_data = export_changeset_fn().await?;
-
-        // Check if there are actual changes
-        if changeset_data.is_empty() {
-            println!("ℹ️ No local changes to export");
-            return Ok(());
-        }
-
-        // Generate filename with timestamp
-        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        let filename = format!("changeset_{}_{}.dat", self.device_id, timestamp);
-
-        // Upload to WebDAV
-        webdav_client.upload_atomic(&filename, changeset_data).await?;
-
-        println!("📤 Exported changeset to WebDAV: {}", filename);
-
-        Ok(())
-    }
-
-    /// Get last sync timestamp
-    pub async fn get_last_sync(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        *self.last_sync.lock().await
+    /// `SyncOutcome::as_str()` des letzten Abgleichs bzw. `"error"`.
+    pub fn get_last_outcome(&self) -> Option<String> {
+        self.last_outcome.lock().unwrap().clone()
     }
 }
 

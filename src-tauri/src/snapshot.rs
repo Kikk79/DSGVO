@@ -1,6 +1,5 @@
 //! Gesamtstand-Datei (Snapshot, `snapshot_v2`): vollständiger Stand eines Geräts inkl.
 //! Löschvermerken. Verweise zwischen Zeilen laufen über UUIDs, nicht über lokale Integer-IDs.
-#![allow(dead_code)] // genutzt ab Task 9 (Sync v2)
 
 use crate::database::Database;
 use crate::sync_time::format_ts;
@@ -259,10 +258,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_snapshot_rejects_legacy_changeset() {
-        let (db, _d) = test_db().await;
-        seed(&db).await;
-        let legacy = db.create_changeset_file(30).await.unwrap();
-        let err = decode(&legacy).unwrap_err();
+        // Alte Änderungsdatei mit gültiger Prüfsumme, aber anderem Format
+        let data = serde_json::json!({
+            "format": "changeset_file_v1",
+            "version": "1.0",
+            "device_id": "alt",
+            "changes": { "observations": [] }
+        });
+        let legacy = serde_json::json!({ "checksum": checksum(&data.to_string()), "data": data })
+            .to_string();
+        let err = decode(legacy.as_bytes()).unwrap_err();
         assert!(err.to_string().contains("Format"), "{err}");
     }
 

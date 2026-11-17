@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Uhr mit Versatz zur Serverzeit.
 
 use anyhow::{anyhow, Result};

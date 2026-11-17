@@ -169,16 +169,25 @@ async fn has_synced_rows(pool: &Pool<Sqlite>) -> Result<bool> {
 
 /// `VACUUM INTO` liefert eine konsistente Kopie, auch mit WAL.
 async fn write_backup(pool: &Pool<Sqlite>, db_path: &Path) -> Result<PathBuf> {
+    write_labeled_backup(pool, db_path, "vor-sync-v2").await
+}
+
+/// Sicherungskopie `<db>.<label>-<YYYYMMDD-HHMMSS>.bak` neben der Datenbank (`VACUUM INTO`).
+pub(crate) async fn write_labeled_backup(
+    pool: &Pool<Sqlite>,
+    db_path: &Path,
+    label: &str,
+) -> Result<PathBuf> {
     let file_name = db_path
         .file_name()
         .ok_or_else(|| anyhow!("Datenbankpfad ohne Dateinamen: {}", db_path.display()))?
         .to_string_lossy()
         .to_string();
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let mut backup = db_path.with_file_name(format!("{}.vor-sync-v2-{}.bak", file_name, stamp));
+    let mut backup = db_path.with_file_name(format!("{}.{}-{}.bak", file_name, label, stamp));
     let mut n = 1;
     while backup.exists() {
-        backup = db_path.with_file_name(format!("{}.vor-sync-v2-{}-{}.bak", file_name, stamp, n));
+        backup = db_path.with_file_name(format!("{}.{}-{}-{}.bak", file_name, label, stamp, n));
         n += 1;
     }
     let target = backup
@@ -198,7 +207,7 @@ async fn write_backup(pool: &Pool<Sqlite>, db_path: &Path) -> Result<PathBuf> {
     if len == 0 {
         bail!("Sicherungskopie {} ist leer", target);
     }
-    println!("Sicherungskopie vor Sync-Umstellung: {}", target);
+    println!("Sicherungskopie ({}): {}", label, target);
     Ok(backup)
 }
 

@@ -3,18 +3,20 @@ use crate::{
     AssessmentRecord, CalendarObservation, Category, Class, Observation, Student, StudentWithStats,
 };
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use crate::sync_schema::derived_uuid;
 use crate::sync_time::{format_ts, SyncClock};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Namen der beim Anlegen erzeugten Standard-Kategorien (siehe `seed_default_categories`).
+const DEFAULT_CATEGORY_NAMES: [&str; 5] = ["Sozial", "Fachlich", "Verhalten", "Förderung", "Sonstiges"];
+
 pub struct Database {
     pool: Pool<Sqlite>,
     crypto: Arc<CryptoManager>,
     /// Pfad der Datenbankdatei (für Sicherungskopien neben der DB).
-    #[allow(dead_code)] // genutzt ab Task 9 (Sync v2)
     db_path: PathBuf,
     /// Uhr mit Versatz zur Serverzeit; Versatz aus `sync_config.clock_offset_ms`.
     clock: Arc<SyncClock>,
@@ -1000,44 +1002,6 @@ impl Database {
         Ok(())
     }
 
-    pub async fn create_changeset_file(&self, days_back: u32) -> Result<Vec<u8>> {
-        let device_id = self.crypto.get_device_id();
-        let cutoff_date = chrono::Utc::now() - chrono::Duration::days(days_back as i64);
-
-        let recent_observations = self.get_observations_since(cutoff_date).await?;
-
-        let changeset = serde_json::json!({
-            "format": "changeset_file_v1",
-            "version": "1.0",
-            "timestamp": chrono::Utc::now(),
-            "device_id": device_id,
-            "days_back": days_back,
-            "changes": {
-                "observations": recent_observations
-            }
-        });
-
-        // Calculate checksum for integrity
-        let content = changeset.to_string();
-        let mut hasher = Sha256::new();
-        hasher.update(content.as_bytes());
-        let checksum = format!("{:x}", hasher.finalize());
-
-        let final_changeset = serde_json::json!({
-            "checksum": checksum,
-            "data": changeset
-        });
-
-        Ok(final_changeset.to_string().into_bytes())
-    }
-
-    /// Übergangslösung, bis die WebDAV-Abgleichsschleife auf Sync v2 umgestellt ist:
-    /// nimmt Dateien im neuen und im alten Format entgegen und führt sie zusammen.
-    pub async fn apply_changeset_file(&self, changeset_data: &[u8]) -> Result<String> {
-        let outcome = crate::legacy_import::import_bytes(self, changeset_data).await?;
-        Ok(outcome.summary())
-    }
-
     async fn seed_default_categories(&self) -> Result<()> {
         // Check if categories already exist
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM categories")
@@ -1420,10 +1384,147 @@ impl Database {
 
     /// Update last sync timestamp
     pub async fn update_last_sync_timestamp(&self) -> Result<()> {
-        sqlx::query("UPDATE sync_config SET last_sync_timestamp = CURRENT_TIMESTAMP WHERE id = 1")
+        sqlx::query("UPDATE sync_config SET last_sync_timestamp = ? WHERE id = 1")
+            .bind(self.now_ts())
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Sync v2: Geräterolle, erster Abgleich, Versatz, Hochlade-Prüfsumme, ETags (`sync_config`)
+
+    /// `"laptop"`, `"desktop"` oder `None` (noch nicht gewählt).
+    pub async fn get_device_role(&self) -> Result<Option<String>> {
+        let role: Option<Option<String>> =
+            sqlx::query_scalar("SELECT device_role FROM sync_config WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(role.flatten())
+    }
+
+    /// Nur `"laptop"` oder `"desktop"`; setzt den erledigten ersten Abgleich nicht zurück.
+    pub async fn set_device_role(&self, role: &str) -> Result<()> {
+        if role != "laptop" && role != "desktop" {
+            anyhow::bail!("Ungültige Geräterolle '{}' (erlaubt: laptop, desktop)", role);
+        }
+        sqlx::query("UPDATE sync_config SET device_role = ? WHERE id = 1")
+            .bind(role)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn is_first_sync_done(&self) -> Result<bool> {
+        let done: Option<i64> =
+            sqlx::query_scalar("SELECT first_sync_done FROM sync_config WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(done.unwrap_or(0) != 0)
+    }
+
+    pub async fn set_first_sync_done(&self) -> Result<()> {
+        sqlx::query("UPDATE sync_config SET first_sync_done = 1 WHERE id = 1")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Aktueller Versatz der Uhr zur Serverzeit (ms).
+    pub fn clock_offset_ms(&self) -> i64 {
+        self.clock.offset_ms()
+    }
+
+    /// Übernimmt einen gemessenen Versatz in die Uhr und speichert ihn dauerhaft.
+    pub async fn set_clock_offset_ms(&self, offset_ms: i64) -> Result<()> {
+        self.clock.set_offset_ms(offset_ms);
+        sqlx::query("UPDATE sync_config SET clock_offset_ms = ? WHERE id = 1")
+            .bind(offset_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_last_upload_hash(&self) -> Result<Option<String>> {
+        let hash: Option<Option<String>> =
+            sqlx::query_scalar("SELECT last_upload_hash FROM sync_config WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(hash.flatten())
+    }
+
+    pub async fn set_last_upload_hash(&self, hash: &str) -> Result<()> {
+        sqlx::query("UPDATE sync_config SET last_upload_hash = ? WHERE id = 1")
+            .bind(hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// ETags fremder Server-Dateien beim letzten erfolgreichen Einlesen (Dateiname → ETag).
+    pub async fn get_remote_etags(&self) -> Result<std::collections::HashMap<String, String>> {
+        let json: Option<String> =
+            sqlx::query_scalar("SELECT remote_etags FROM sync_config WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        // Unlesbarer Inhalt → leer, d.h. beim nächsten Abgleich alles neu laden.
+        Ok(json
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default())
+    }
+
+    pub async fn set_remote_etags(
+        &self,
+        etags: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE sync_config SET remote_etags = ? WHERE id = 1")
+            .bind(serde_json::to_string(etags)?)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Gibt es lokale fachliche Daten (inkl. Löschvermerken)? Die beim Anlegen der Datenbank
+    /// erzeugten Standard-Kategorien zählen nicht.
+    pub async fn has_business_data(&self) -> Result<bool> {
+        let placeholders = DEFAULT_CATEGORY_NAMES
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT (SELECT COUNT(*) FROM classes) + (SELECT COUNT(*) FROM students)
+                  + (SELECT COUNT(*) FROM observations)
+                  + (SELECT COUNT(*) FROM categories WHERE name NOT IN ({}))",
+            placeholders
+        );
+        let mut q = sqlx::query_scalar::<_, i64>(&sql);
+        for name in DEFAULT_CATEGORY_NAMES {
+            q = q.bind(name);
+        }
+        Ok(q.fetch_one(&self.pool).await? > 0)
+    }
+
+    /// Sicherungskopie `<db>.vor-erstabgleich-<zeit>.bak` vor dem Ersetzen beim ersten Abgleich.
+    pub async fn backup_before_first_sync(&self) -> Result<PathBuf> {
+        crate::sync_schema::write_labeled_backup(&self.pool, &self.db_path, "vor-erstabgleich")
+            .await
+    }
+
+    /// Zeilen, die `all_rows_for_snapshot` mangels Elternteil auslässt:
+    /// (Schüler ohne Klasse, Beobachtungen ohne Schüler).
+    pub async fn snapshot_orphan_counts(&self) -> Result<(i64, i64)> {
+        let students: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM students WHERE class_id NOT IN (SELECT id FROM classes)",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let observations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observations WHERE student_id NOT IN (SELECT id FROM students)",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((students, observations))
     }
 
     /// Get last sync timestamp
@@ -1690,6 +1791,32 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Datei einlesen wie die Import-Befehle (neues oder altes Format), Ergebnistext.
+    async fn import_file(db: &Database, bytes: &[u8]) -> Result<String> {
+        crate::legacy_import::import_bytes(db, bytes)
+            .await
+            .map(|o| o.summary())
+    }
+
+    /// Alte Änderungsdatei (`changeset_file_v1`): Beobachtungen der letzten `days_back` Tage.
+    async fn legacy_changeset(db: &Database, days_back: u32) -> Result<Vec<u8>> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days_back as i64);
+        let data = serde_json::json!({
+            "format": "changeset_file_v1",
+            "version": "1.0",
+            "timestamp": chrono::Utc::now(),
+            "device_id": db.get_device_id(),
+            "days_back": days_back,
+            "changes": { "observations": db.get_observations_since(cutoff).await? }
+        });
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(data.to_string().as_bytes());
+        let checksum = format!("{:x}", hasher.finalize());
+        Ok(serde_json::json!({ "checksum": checksum, "data": data })
+            .to_string()
+            .into_bytes())
+    }
+
     async fn create_test_db() -> (Database, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
@@ -1885,7 +2012,7 @@ mod tests {
         assert_eq!(observations_after_hard.len(), 0);
 
         // Ein Löschvermerk gewinnt: ein alter Import belebt Schüler und Beobachtung nicht wieder
-        let result = db.apply_changeset_file(&backup_data).await.unwrap();
+        let result = import_file(&db, &backup_data).await.unwrap();
         assert!(result.contains("neu"), "{result}");
         assert_eq!(db.get_students().await.unwrap().len(), 0);
         assert_eq!(db.search_observations(None, None, None).await.unwrap().len(), 0);
@@ -2078,7 +2205,7 @@ mod tests {
         let empty_observations = db.search_observations(None, None, None).await.unwrap();
         assert_eq!(empty_observations.len(), 0);
 
-        let result = db.apply_changeset_file(&changeset_data).await.unwrap();
+        let result = import_file(&db, &changeset_data).await.unwrap();
         assert!(result.contains("neu"), "{result}");
 
         let restored_observations = db.search_observations(None, None, None).await.unwrap();
@@ -2137,7 +2264,7 @@ mod tests {
         db.clear_all_data().await.unwrap();
 
         // Import backup
-        let result = db.apply_changeset_file(&backup_data).await.unwrap();
+        let result = import_file(&db, &backup_data).await.unwrap();
         assert_eq!(result, "3 neu, 0 aktualisiert, 0 gelöscht");
 
         // Verify imported data (Zeilen bekommen lokale IDs; die Sicherung enthält nur die
@@ -2357,7 +2484,7 @@ mod tests {
 
         // Test with invalid JSON
         let invalid_data = b"invalid json data";
-        let result = db.apply_changeset_file(invalid_data).await;
+        let result = import_file(&db, invalid_data).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("JSON"));
 
@@ -2369,7 +2496,7 @@ mod tests {
         });
 
         let incomplete_data = incomplete_json.to_string().into_bytes();
-        let result = db.apply_changeset_file(&incomplete_data).await;
+        let result = import_file(&db, &incomplete_data).await;
         assert!(result.is_err());
     }
 
@@ -2495,9 +2622,7 @@ mod tests {
         let device_b = create_single_connection_test_db().await;
 
         let observation = create_test_observation(&device_a.0).await;
-        device_b
-            .0
-            .apply_changeset_file(&export_full_backup(&device_a.0).await)
+        import_file(&device_b.0, &export_full_backup(&device_a.0).await)
             .await
             .unwrap();
 
@@ -2666,7 +2791,7 @@ mod tests {
 
         // ... and therefore into the exported changeset
         let changeset: serde_json::Value =
-            serde_json::from_slice(&db.create_changeset_file(30).await.unwrap()).unwrap();
+            serde_json::from_slice(&legacy_changeset(&db, 30).await.unwrap()).unwrap();
         let exported = changeset["data"]["changes"]["observations"]
             .as_array()
             .unwrap();
@@ -2690,8 +2815,8 @@ mod tests {
             .unwrap();
 
         // Device B imports the changeset of device A
-        let changeset = db_a.create_changeset_file(30).await.unwrap();
-        let result = db_b.apply_changeset_file(&changeset).await.unwrap();
+        let changeset = legacy_changeset(&db_a, 30).await.unwrap();
+        let result = import_file(&db_b, &changeset).await.unwrap();
         assert_eq!(result, "0 neu, 1 aktualisiert, 0 gelöscht");
 
         let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
@@ -2703,7 +2828,7 @@ mod tests {
         assert_eq!(on_b.source_device_id, observation.source_device_id);
 
         // Importing the same changeset again (WebDAV sync re-reads every file) is a no-op
-        let result = db_b.apply_changeset_file(&changeset).await.unwrap();
+        let result = import_file(&db_b, &changeset).await.unwrap();
         assert_eq!(result, "0 neu, 0 aktualisiert, 0 gelöscht");
         let observations = db_b.search_observations(None, None, None).await.unwrap();
         assert_eq!(observations.len(), 1);
@@ -2714,7 +2839,7 @@ mod tests {
         let ((db_a, _dir_a), (db_b, _dir_b), observation) = create_synced_devices().await;
 
         // Device A exports the original version, edits, and exports again
-        let original_changeset = db_a.create_changeset_file(30).await.unwrap();
+        let original_changeset = legacy_changeset(&db_a, 30).await.unwrap();
         db_a.update_observation(
             observation.id,
             "social".to_string(),
@@ -2723,7 +2848,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let older_changeset = db_a.create_changeset_file(30).await.unwrap();
+        let older_changeset = legacy_changeset(&db_a, 30).await.unwrap();
 
         // Device B edits afterwards
         let newer = db_b
@@ -2738,7 +2863,7 @@ mod tests {
 
         // Neither older copy may replace the newer edit on device B
         for changeset in [&original_changeset, &older_changeset] {
-            let result = db_b.apply_changeset_file(changeset).await.unwrap();
+            let result = import_file(&db_b, changeset).await.unwrap();
             assert_eq!(result, "0 neu, 0 aktualisiert, 0 gelöscht");
         }
         let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
@@ -2748,8 +2873,8 @@ mod tests {
         assert_eq!(on_b.updated_at, newer.updated_at);
 
         // The newer edit wins on device A as well
-        let newer_changeset = db_b.create_changeset_file(30).await.unwrap();
-        let result = db_a.apply_changeset_file(&newer_changeset).await.unwrap();
+        let newer_changeset = legacy_changeset(&db_b, 30).await.unwrap();
+        let result = import_file(&db_a, &newer_changeset).await.unwrap();
         assert_eq!(result, "0 neu, 1 aktualisiert, 0 gelöscht");
         let on_a = db_a.get_observation(observation.id).await.unwrap().unwrap();
         assert_eq!(on_a.text, "Newer edit on device B");
@@ -2771,7 +2896,7 @@ mod tests {
             .await
             .unwrap();
         let backup_a = export_full_backup(&db_a).await;
-        let result = db_b.apply_changeset_file(&backup_a).await.unwrap();
+        let result = import_file(&db_b, &backup_a).await.unwrap();
         assert!(result.starts_with("0 neu, 1 aktualisiert"), "{result}");
 
         let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
@@ -2790,7 +2915,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let result = db_b.apply_changeset_file(&backup_a).await.unwrap();
+        let result = import_file(&db_b, &backup_a).await.unwrap();
         assert!(result.starts_with("0 neu, 0 aktualisiert"), "{result}");
 
         let on_b = db_b.get_observation(observation.id).await.unwrap().unwrap();
@@ -2827,7 +2952,7 @@ mod tests {
                       "observations": [other_device, other_creation] }
         })
         .to_string();
-        let result = db.apply_changeset_file(backup.as_bytes()).await.unwrap();
+        let result = import_file(&db, backup.as_bytes()).await.unwrap();
         // Die UUID bestimmt die Identität: zwei fremde Beobachtungen kommen neu hinzu.
         assert_eq!(result, "2 neu, 0 aktualisiert, 0 gelöscht");
 
@@ -3526,7 +3651,7 @@ zweite Zeile', '[]', '2025-09-05 12:00:00', '2025-09-05T12:00:00Z', 'desktop-B')
                         "source_device_id": "laptop-A"}]
                 }
             });
-            db.apply_changeset_file(backup.to_string().as_bytes()).await.unwrap();
+            import_file(&db, backup.to_string().as_bytes()).await.unwrap();
 
             // Importierte Zeilen bekommen lokale IDs; Identität ist die UUID.
             let obs: (String, String) = sqlx::query_as(

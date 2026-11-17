@@ -1,0 +1,968 @@
+//! Abgleich über Gesamtstände mit Geräterolle (Spezifikation 5.5, 5.8).
+//!
+//! Ablauf von [`run_sync`]:
+//! 1. Server-Verzeichnis lesen, Versatz zur Serverzeit übernehmen und speichern.
+//! 2. Fremde `snapshot_*.json` laden (nur wenn der ETag sich geändert hat; beim ersten Abgleich
+//!    eines Desktops immer alle). Unlesbare Dateien werden übersprungen und protokolliert.
+//! 3. Desktop vor dem ersten Abgleich: ohne Laptop-Stand nichts tun (`WaitingForLaptop` bzw.
+//!    `NoLaptopFound`); sonst Sicherungskopie (falls lokale Daten), lokalen Stand durch den
+//!    jüngsten Laptop-Stand ersetzen, übrige Stände zusammenführen, ersten Abgleich merken.
+//! 4. Sonst: alle fremden Stände zusammenführen.
+//! 5. Eigenen Stand bauen und nur hochladen, wenn er sich seit dem letzten Hochladen geändert hat.
+//! 6. Eigene alte Änderungsdateien `changeset_<device_id>_*.dat` löschen (A11).
+//! 7. Zeitpunkt des erfolgreichen Abgleichs speichern (A6).
+//!
+//! Die Datenbank-Sperre wird nur für reine Datenbank-Schritte genommen, nie über Netzwerk-Aufrufe.
+
+use crate::audit::AuditLogger;
+use crate::database::Database;
+use crate::merge::{log_merge_audit, merge_snapshot, replace_with_snapshot, MergeReport};
+use crate::snapshot::{build_snapshot, counts, decode, encode, snapshot_file_name, Snapshot};
+use crate::sync_time::parse_ts;
+use crate::webdav_sync::WebDavClient;
+use anyhow::{Context, Result};
+use serde::ser::SerializeMap;
+use serde::{Serialize, Serializer};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use tokio::sync::Mutex;
+
+pub const ROLE_LAPTOP: &str = "laptop";
+pub const ROLE_DESKTOP: &str = "desktop";
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncOutcome {
+    Synced(MergeReport),
+    WaitingForLaptop,
+    NoLaptopFound,
+    NotConfigured,
+}
+
+impl SyncOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SyncOutcome::Synced(_) => "synced",
+            SyncOutcome::WaitingForLaptop => "waiting_for_laptop",
+            SyncOutcome::NoLaptopFound => "no_laptop_found",
+            SyncOutcome::NotConfigured => "not_configured",
+        }
+    }
+}
+
+/// `{ "outcome": "...", "report"?: {inserted, updated, tombstoned, skipped} }`
+impl Serialize for SyncOutcome {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("outcome", self.as_str())?;
+        if let SyncOutcome::Synced(r) = self {
+            map.serialize_entry(
+                "report",
+                &serde_json::json!({
+                    "inserted": r.inserted,
+                    "updated": r.updated,
+                    "tombstoned": r.tombstoned,
+                    "skipped": r.skipped,
+                }),
+            )?;
+        }
+        map.end()
+    }
+}
+
+/// Vorbelegung der Rollenauswahl aus dem Gerätetyp (`notebook` → Laptop, sonst Desktop).
+pub fn role_suggestion(device_type: Option<&str>) -> &'static str {
+    match device_type {
+        Some("notebook") => ROLE_LAPTOP,
+        _ => ROLE_DESKTOP,
+    }
+}
+
+/// Eine gelesene fremde Server-Datei.
+struct Remote {
+    name: String,
+    etag: Option<String>,
+    snap: Snapshot,
+}
+
+fn add_report(total: &mut MergeReport, r: MergeReport) {
+    total.inserted += r.inserted;
+    total.updated += r.updated;
+    total.tombstoned += r.tombstoned;
+    total.skipped += r.skipped;
+    total.changes.extend(r.changes);
+}
+
+/// Prüfsumme des Inhalts ohne `generated_at` (das sich bei jedem Bauen ändert).
+fn content_hash(snap: &Snapshot) -> String {
+    let mut s = snap.clone();
+    s.generated_at = String::new();
+    let mut hasher = Sha256::new();
+    hasher.update(encode(&s));
+    format!("{:x}", hasher.finalize())
+}
+
+fn is_snapshot_file(name: &str) -> bool {
+    name.starts_with("snapshot_") && name.ends_with(".json")
+}
+
+/// Jüngster Laptop-Stand nach `generated_at` (Serverzeit).
+fn newest_laptop(remotes: &[Remote]) -> Option<usize> {
+    remotes
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.snap.device_role.as_deref() == Some(ROLE_LAPTOP))
+        .max_by(|(_, a), (_, b)| {
+            match (
+                parse_ts(&a.snap.generated_at),
+                parse_ts(&b.snap.generated_at),
+            ) {
+                (Ok(x), Ok(y)) => x.cmp(&y),
+                _ => a.snap.generated_at.cmp(&b.snap.generated_at),
+            }
+            .then_with(|| a.snap.device_id.cmp(&b.snap.device_id))
+        })
+        .map(|(i, _)| i)
+}
+
+/// Führt eine Datei zusammen; Fehler → Datei überspringen (alles zurückgerollt), protokollieren.
+/// Audit nach dem Festschreiben; Audit-Fehler brechen den Abgleich nicht ab.
+async fn merge_one(
+    db: &Database,
+    remote: &Remote,
+    audit: Option<&AuditLogger>,
+    total: &mut MergeReport,
+    etags: &mut HashMap<String, String>,
+) {
+    match merge_snapshot(db, &remote.snap).await {
+        Ok(report) => {
+            println!(
+                "Abgleich: {} zusammengeführt ({} neu, {} aktualisiert, {} gelöscht)",
+                remote.name, report.inserted, report.updated, report.tombstoned
+            );
+            write_audit(audit, &report).await;
+            add_report(total, report);
+            if let Some(tag) = &remote.etag {
+                etags.insert(remote.name.clone(), tag.clone());
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "Abgleich: {} übersprungen (Zusammenführen fehlgeschlagen): {:#}",
+                remote.name, e
+            );
+            etags.remove(&remote.name);
+        }
+    }
+}
+
+async fn write_audit(audit: Option<&AuditLogger>, report: &MergeReport) {
+    if let Some(audit) = audit {
+        if let Err(e) = log_merge_audit(audit, report).await {
+            eprintln!(
+                "Abgleich: Audit-Einträge konnten nicht geschrieben werden: {:#}",
+                e
+            );
+        }
+    }
+}
+
+/// Ein vollständiger Abgleich mit dem WebDAV-Ordner. `audit`: Audit-Log für übernommene
+/// Änderungen (in Tests `None`). Der zurückgegebene Bericht dient nur der Anzeige; die
+/// Audit-Einträge sind bereits geschrieben.
+pub async fn run_sync(
+    db: &Mutex<Database>,
+    client: &WebDavClient,
+    audit: Option<&AuditLogger>,
+) -> Result<SyncOutcome> {
+    // Lokaler Zustand (nur DB)
+    let (role, first_done, stored_etags, device_id) = {
+        let db = db.lock().await;
+        (
+            db.get_device_role().await?,
+            db.is_first_sync_done().await?,
+            db.get_remote_etags().await?,
+            db.get_device_id(),
+        )
+    };
+    let Some(role) = role else {
+        return Ok(SyncOutcome::NotConfigured);
+    };
+    let first_desktop_sync = role == ROLE_DESKTOP && !first_done;
+    let own_name = snapshot_file_name(&device_id);
+
+    // 1. Verzeichnis lesen, Versatz übernehmen
+    let listing = client
+        .list_entries()
+        .await
+        .context("Server-Verzeichnis konnte nicht gelesen werden")?;
+    if let Some(offset) = listing.offset_ms {
+        db.lock().await.set_clock_offset_ms(offset).await?;
+    }
+    let entries = listing.value;
+
+    // 2. Fremde Gesamtstände laden (Netz, ohne DB-Sperre)
+    let mut etags: HashMap<String, String> = stored_etags
+        .iter()
+        .filter(|(name, _)| entries.iter().any(|e| &e.name == *name))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let mut remotes = Vec::new();
+    for entry in entries
+        .iter()
+        .filter(|e| is_snapshot_file(&e.name) && e.name != own_name)
+    {
+        let unchanged = matches!(
+            (&entry.etag, stored_etags.get(&entry.name)),
+            (Some(now), Some(before)) if now == before
+        );
+        if unchanged && !first_desktop_sync {
+            continue;
+        }
+        let bytes = client
+            .download(&entry.name)
+            .await
+            .with_context(|| format!("{} konnte nicht geladen werden", entry.name))?
+            .value;
+        match decode(&bytes) {
+            Ok(snap) if snap.device_id == device_id => {
+                eprintln!(
+                    "Abgleich: {} übersprungen (enthält den Stand dieses Geräts)",
+                    entry.name
+                );
+                etags.remove(&entry.name);
+            }
+            Ok(snap) => remotes.push(Remote {
+                name: entry.name.clone(),
+                etag: entry.etag.clone(),
+                snap,
+            }),
+            Err(e) => {
+                eprintln!("Abgleich: {} übersprungen: {:#}", entry.name, e);
+                etags.remove(&entry.name);
+            }
+        }
+    }
+
+    // 3./4. Zusammenführen bzw. erster Abgleich des Desktops (nur DB)
+    let mut total = MergeReport::default();
+    {
+        let db = db.lock().await;
+        if first_desktop_sync {
+            let Some(laptop_idx) = newest_laptop(&remotes) else {
+                let any_desktop = remotes
+                    .iter()
+                    .any(|r| r.snap.device_role.as_deref() == Some(ROLE_DESKTOP));
+                return Ok(if any_desktop {
+                    SyncOutcome::NoLaptopFound
+                } else {
+                    SyncOutcome::WaitingForLaptop
+                });
+            };
+            let laptop = &remotes[laptop_idx];
+            if db.has_business_data().await? {
+                let backup = db.backup_before_first_sync().await?;
+                println!("Erster Abgleich: Sicherungskopie {}", backup.display());
+            }
+            let report = replace_with_snapshot(&db, &laptop.snap)
+                .await
+                .with_context(|| format!("Stand vom Laptop ({}) übernehmen", laptop.name))?;
+            let (students, observations) = counts(&laptop.snap);
+            println!(
+                "Erster Abgleich: lokaler Stand durch {} ersetzt ({} Schüler, {} Beobachtungen)",
+                laptop.name, students, observations
+            );
+            write_audit(audit, &report).await;
+            add_report(&mut total, report);
+            if let Some(tag) = &laptop.etag {
+                etags.insert(laptop.name.clone(), tag.clone());
+            }
+            for (i, remote) in remotes.iter().enumerate() {
+                if i != laptop_idx {
+                    merge_one(&db, remote, audit, &mut total, &mut etags).await;
+                }
+            }
+        } else {
+            for remote in &remotes {
+                merge_one(&db, remote, audit, &mut total, &mut etags).await;
+            }
+        }
+        if !first_done {
+            db.set_first_sync_done().await?;
+        }
+        db.set_remote_etags(&etags).await?;
+    }
+
+    // 5. Eigenen Stand bauen (DB), nur bei Änderung hochladen (Netz)
+    let (bytes, hash, last_hash) = {
+        let db = db.lock().await;
+        let (orphan_students, orphan_observations) = db.snapshot_orphan_counts().await?;
+        if orphan_students + orphan_observations > 0 {
+            eprintln!(
+                "Abgleich: {} Schüler ohne Klasse und {} Beobachtungen ohne Schüler werden nicht übertragen",
+                orphan_students, orphan_observations
+            );
+        }
+        let snap = build_snapshot(&db, Some(role.clone()), None).await?;
+        (
+            encode(&snap),
+            content_hash(&snap),
+            db.get_last_upload_hash().await?,
+        )
+    };
+    let own_on_server = entries.iter().any(|e| e.name == own_name);
+    if last_hash.as_deref() != Some(hash.as_str()) || !own_on_server {
+        client
+            .upload_atomic(&own_name, bytes)
+            .await
+            .with_context(|| format!("{} konnte nicht hochgeladen werden", own_name))?;
+        db.lock().await.set_last_upload_hash(&hash).await?;
+        println!("Abgleich: eigener Stand hochgeladen ({})", own_name);
+    }
+
+    // 6. Eigene alte Änderungsdateien löschen (A11); Fehler nicht fatal
+    let legacy_prefix = format!("changeset_{}_", device_id);
+    for entry in entries
+        .iter()
+        .filter(|e| e.name.starts_with(&legacy_prefix) && e.name.ends_with(".dat"))
+    {
+        match client.delete(&entry.name).await {
+            Ok(_) => println!("Abgleich: alte Änderungsdatei {} gelöscht", entry.name),
+            Err(e) => eprintln!(
+                "Abgleich: alte Änderungsdatei {} nicht gelöscht: {:#}",
+                entry.name, e
+            ),
+        }
+    }
+
+    // 7. Erfolgreichen Abgleich vermerken
+    db.lock().await.update_last_sync_timestamp().await?;
+    Ok(SyncOutcome::Synced(total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    // -----------------------------------------------------------------------------------------
+    // In-Memory-WebDAV (PROPFIND/GET/PUT/MOVE/DELETE)
+
+    #[derive(Default)]
+    struct DavState {
+        files: BTreeMap<String, (Vec<u8>, u64)>,
+        version: u64,
+        log: Vec<(String, String)>,
+    }
+
+    #[derive(Clone)]
+    struct FakeDav {
+        url: String,
+        state: Arc<std::sync::Mutex<DavState>>,
+    }
+
+    impl FakeDav {
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let state = Arc::new(std::sync::Mutex::new(DavState::default()));
+            let st = state.clone();
+            tokio::spawn(async move {
+                while let Ok((sock, _)) = listener.accept().await {
+                    let st = st.clone();
+                    tokio::spawn(async move { serve(sock, st).await });
+                }
+            });
+            Self {
+                url: format!("http://{}/dav", addr),
+                state,
+            }
+        }
+
+        fn client(&self) -> WebDavClient {
+            WebDavClient::new(self.url.clone(), "u".into(), "p".into())
+        }
+
+        fn put_raw(&self, name: &str, data: &[u8]) {
+            let mut s = self.state.lock().unwrap();
+            s.version += 1;
+            let v = s.version;
+            s.files.insert(name.to_string(), (data.to_vec(), v));
+        }
+
+        fn get(&self, name: &str) -> Option<Vec<u8>> {
+            self.state
+                .lock()
+                .unwrap()
+                .files
+                .get(name)
+                .map(|f| f.0.clone())
+        }
+
+        fn names(&self) -> Vec<String> {
+            self.state.lock().unwrap().files.keys().cloned().collect()
+        }
+
+        fn count(&self, method: &str) -> usize {
+            self.state
+                .lock()
+                .unwrap()
+                .log
+                .iter()
+                .filter(|(m, _)| m == method)
+                .count()
+        }
+
+        fn clear_log(&self) {
+            self.state.lock().unwrap().log.clear();
+        }
+    }
+
+    fn file_name_of(path: &str) -> String {
+        let last = path.rsplit('/').next().unwrap_or("");
+        urlencoding::decode(last).unwrap_or_default().to_string()
+    }
+
+    async fn serve(mut sock: tokio::net::TcpStream, state: Arc<std::sync::Mutex<DavState>>) {
+        let mut data = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let header_end = loop {
+            let n = sock.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            data.extend_from_slice(&chunk[..n]);
+            if let Some(p) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                break p;
+            }
+        };
+        let head = String::from_utf8_lossy(&data[..header_end]).to_string();
+        let mut lines = head.lines();
+        let mut first = lines.next().unwrap().split_whitespace();
+        let method = first.next().unwrap().to_string();
+        let path = first.next().unwrap().to_string();
+        let headers: HashMap<String, String> = lines
+            .filter_map(|l| l.split_once(':'))
+            .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+            .collect();
+        let len: usize = headers
+            .get("content-length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut body = data[header_end + 4..].to_vec();
+        while body.len() < len {
+            let n = sock.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+
+        let (status, resp_body): (u16, Vec<u8>) = {
+            let mut s = state.lock().unwrap();
+            s.log.push((method.clone(), path.clone()));
+            let name = file_name_of(&path);
+            match method.as_str() {
+                "PROPFIND" => {
+                    let mut xml = String::from(
+                        r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/</d:href></d:response>"#,
+                    );
+                    for (n, (_, v)) in &s.files {
+                        xml.push_str(&format!(
+                            r#"<d:response><d:href>/dav/{}</d:href><d:propstat><d:prop><d:getetag>"v{}"</d:getetag></d:prop></d:propstat></d:response>"#,
+                            urlencoding::encode(n),
+                            v
+                        ));
+                    }
+                    xml.push_str("</d:multistatus>");
+                    (207, xml.into_bytes())
+                }
+                "GET" => match s.files.get(&name) {
+                    Some((d, _)) => (200, d.clone()),
+                    None => (404, Vec::new()),
+                },
+                "PUT" => {
+                    s.version += 1;
+                    let v = s.version;
+                    s.files.insert(name, (body, v));
+                    (201, Vec::new())
+                }
+                "MOVE" => {
+                    let dest =
+                        file_name_of(headers.get("destination").map(|d| d.as_str()).unwrap_or(""));
+                    match s.files.remove(&name) {
+                        Some((d, _)) => {
+                            s.version += 1;
+                            let v = s.version;
+                            s.files.insert(dest, (d, v));
+                            (201, Vec::new())
+                        }
+                        None => (404, Vec::new()),
+                    }
+                }
+                "DELETE" => match s.files.remove(&name) {
+                    Some(_) => (204, Vec::new()),
+                    None => (404, Vec::new()),
+                },
+                _ => (405, Vec::new()),
+            }
+        };
+        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT");
+        let mut resp = format!(
+            "HTTP/1.1 {} X\r\nDate: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status,
+            date,
+            resp_body.len()
+        )
+        .into_bytes();
+        resp.extend_from_slice(&resp_body);
+        let _ = sock.write_all(&resp).await;
+        let _ = sock.shutdown().await;
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Testgeräte
+
+    struct Device {
+        db: Mutex<Database>,
+        dir: TempDir,
+    }
+
+    async fn device(id: &str, role: Option<&str>) -> Device {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open_for_test(&dir.path().join("t.db"), id, 0)
+            .await
+            .unwrap();
+        if let Some(role) = role {
+            db.set_device_role(role).await.unwrap();
+        }
+        Device {
+            db: Mutex::new(db),
+            dir,
+        }
+    }
+
+    impl Device {
+        async fn sync(&self, dav: &FakeDav) -> Result<SyncOutcome> {
+            run_sync(&self.db, &dav.client(), None).await
+        }
+
+        /// Fachlicher Stand ohne gerätespezifische Kopfdaten, nach UUID sortiert.
+        async fn rows(&self) -> crate::snapshot::SnapshotRows {
+            let db = self.db.lock().await;
+            let mut r = db.all_rows_for_snapshot().await.unwrap();
+            r.categories.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+            r.classes.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+            r.students.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+            r.observations.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+            r
+        }
+
+        /// Legt Klasse, Schüler und Beobachtung an; liefert die Schüler-ID.
+        async fn seed(&self, class: &str, first: &str, text: &str) -> i64 {
+            let db = self.db.lock().await;
+            let c = db
+                .create_class(class.into(), "2026/27".into())
+                .await
+                .unwrap();
+            let s = db
+                .create_student(c.id, first.into(), "Muster".into(), None)
+                .await
+                .unwrap();
+            db.create_observation(s.id, 1, "Sozial".into(), text.into(), vec![])
+                .await
+                .unwrap();
+            s.id
+        }
+
+        async fn observation_texts(&self) -> Vec<String> {
+            let db = self.db.lock().await;
+            let mut v: Vec<String> = db
+                .search_observations(None, None, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|o| o.text)
+                .collect();
+            v.sort();
+            v
+        }
+
+        fn backups(&self) -> Vec<String> {
+            std::fs::read_dir(self.dir.path())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.contains(".vor-erstabgleich-") && n.ends_with(".bak"))
+                .collect()
+        }
+    }
+
+    fn synced(o: SyncOutcome) -> MergeReport {
+        match o {
+            SyncOutcome::Synced(r) => r,
+            other => panic!("erwartet Synced, war {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Tests
+
+    #[tokio::test]
+    async fn test_laptop_then_desktop_end_to_end() {
+        let dav = FakeDav::start().await;
+        let laptop = device("laptop-1", Some("laptop")).await;
+        let desktop = device("desktop-1", Some("desktop")).await;
+        laptop.seed("5a", "Max", "vom Laptop").await;
+
+        synced(laptop.sync(&dav).await.unwrap());
+        assert!(dav.names().contains(&"snapshot_laptop-1.json".to_string()));
+
+        synced(desktop.sync(&dav).await.unwrap());
+        assert_eq!(desktop.rows().await, laptop.rows().await);
+        // Leerer Desktop: keine Sicherungskopie
+        assert!(desktop.backups().is_empty());
+
+        // Desktop bearbeitet, beide synchronisieren
+        {
+            let db = desktop.db.lock().await;
+            let s = db.get_students().await.unwrap()[0].id;
+            db.create_observation(s, 1, "Sozial".into(), "vom Desktop".into(), vec![])
+                .await
+                .unwrap();
+        }
+        synced(desktop.sync(&dav).await.unwrap());
+        let r = synced(laptop.sync(&dav).await.unwrap());
+        assert_eq!(r.inserted, 1);
+        assert_eq!(
+            laptop.observation_texts().await,
+            vec!["vom Desktop".to_string(), "vom Laptop".to_string()]
+        );
+        assert_eq!(desktop.rows().await, laptop.rows().await);
+        // Zeitpunkt des Abgleichs gespeichert (A6)
+        assert!(laptop
+            .db
+            .lock()
+            .await
+            .get_last_sync_timestamp()
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_desktop_waits_then_replaces_once() {
+        let dav = FakeDav::start().await;
+        let laptop = device("laptop-1", Some("laptop")).await;
+        let desktop = device("desktop-1", Some("desktop")).await;
+        desktop.seed("alt", "Veraltet", "veraltet").await;
+        laptop.seed("5a", "Max", "vom Laptop").await;
+
+        // Desktop zuerst: wartet, lädt nichts hoch, ändert nichts
+        let before = desktop.rows().await;
+        assert_eq!(
+            desktop.sync(&dav).await.unwrap(),
+            SyncOutcome::WaitingForLaptop
+        );
+        assert_eq!(dav.count("PUT"), 0);
+        assert!(dav.names().is_empty());
+        assert_eq!(desktop.rows().await, before);
+        assert!(!desktop.db.lock().await.is_first_sync_done().await.unwrap());
+
+        synced(laptop.sync(&dav).await.unwrap());
+        synced(desktop.sync(&dav).await.unwrap());
+        assert_eq!(desktop.rows().await, laptop.rows().await);
+        assert_eq!(
+            desktop.observation_texts().await,
+            vec!["vom Laptop".to_string()]
+        );
+        assert_eq!(
+            desktop.backups().len(),
+            1,
+            "Sicherungskopie vor dem Ersetzen"
+        );
+        assert!(desktop.db.lock().await.is_first_sync_done().await.unwrap());
+
+        // Danach: eigene Beobachtung wird zusammengeführt, nicht ersetzt
+        {
+            let db = desktop.db.lock().await;
+            let s = db.get_students().await.unwrap()[0].id;
+            db.create_observation(s, 1, "Sozial".into(), "neu am Desktop".into(), vec![])
+                .await
+                .unwrap();
+        }
+        // Laptop ändert ebenfalls etwas, damit sein Stand neu geladen wird
+        laptop.seed("6b", "Erika", "zweite vom Laptop").await;
+        synced(laptop.sync(&dav).await.unwrap());
+        synced(desktop.sync(&dav).await.unwrap());
+        assert_eq!(
+            desktop.observation_texts().await,
+            vec![
+                "neu am Desktop".to_string(),
+                "vom Laptop".to_string(),
+                "zweite vom Laptop".to_string()
+            ]
+        );
+        assert_eq!(desktop.backups().len(), 1, "keine zweite Ersetzung");
+        synced(laptop.sync(&dav).await.unwrap());
+        assert_eq!(desktop.rows().await, laptop.rows().await);
+    }
+
+    #[tokio::test]
+    async fn test_two_laptops_merge_without_replace() {
+        let dav = FakeDav::start().await;
+        let a = device("laptop-a", Some("laptop")).await;
+        let b = device("laptop-b", Some("laptop")).await;
+        a.seed("5a", "Anna", "von A").await;
+        b.seed("7c", "Bert", "von B").await;
+
+        synced(a.sync(&dav).await.unwrap());
+        synced(b.sync(&dav).await.unwrap());
+        synced(a.sync(&dav).await.unwrap());
+        let both = vec!["von A".to_string(), "von B".to_string()];
+        assert_eq!(a.observation_texts().await, both);
+        assert_eq!(b.observation_texts().await, both);
+        assert_eq!(a.rows().await, b.rows().await);
+        assert!(a.backups().is_empty() && b.backups().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_two_desktops_report_no_laptop() {
+        let dav = FakeDav::start().await;
+        let d1 = device("desktop-1", Some("desktop")).await;
+        let d2 = device("desktop-2", Some("desktop")).await;
+        d1.seed("5a", "Anna", "d1").await;
+        d2.seed("5b", "Bert", "d2").await;
+
+        assert_eq!(d1.sync(&dav).await.unwrap(), SyncOutcome::WaitingForLaptop);
+        assert_eq!(d2.sync(&dav).await.unwrap(), SyncOutcome::WaitingForLaptop);
+        assert!(dav.names().is_empty());
+
+        // Ein Desktop-Stand liegt vor (z.B. von einem früher als Laptop eingestellten Gerät,
+        // das inzwischen Desktop ist), aber kein Laptop-Stand → "Kein Laptop gefunden".
+        let snap = {
+            let db = d2.db.lock().await;
+            build_snapshot(&db, Some(ROLE_DESKTOP.into()), None)
+                .await
+                .unwrap()
+        };
+        dav.put_raw("snapshot_desktop-2.json", &encode(&snap));
+        let before = d1.rows().await;
+        assert_eq!(d1.sync(&dav).await.unwrap(), SyncOutcome::NoLaptopFound);
+        assert_eq!(d1.rows().await, before);
+        assert_eq!(dav.names(), vec!["snapshot_desktop-2.json".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_role_unknown_is_not_configured() {
+        let dav = FakeDav::start().await;
+        let d = device("dev-1", None).await;
+        assert_eq!(d.sync(&dav).await.unwrap(), SyncOutcome::NotConfigured);
+        assert_eq!(
+            dav.count("PUT") + dav.count("DELETE") + dav.count("MOVE"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_without_server_leaves_data_untouched() {
+        let laptop = device("laptop-1", Some("laptop")).await;
+        laptop.seed("5a", "Max", "Text").await;
+        laptop
+            .db
+            .lock()
+            .await
+            .set_clock_offset_ms(1234)
+            .await
+            .unwrap();
+        let before = laptop.rows().await;
+
+        // Geschlossener Port
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let client = WebDavClient::new(
+            format!("http://127.0.0.1:{}/dav", port),
+            "u".into(),
+            "p".into(),
+        );
+        assert!(run_sync(&laptop.db, &client, None).await.is_err());
+        assert_eq!(laptop.rows().await, before);
+        let db = laptop.db.lock().await;
+        assert_eq!(db.clock_offset_ms(), 1234);
+        assert!(db.get_last_sync_timestamp().await.unwrap().is_none());
+        assert!(!db.is_first_sync_done().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_sync_skips_corrupt_and_foreign_files() {
+        let dav = FakeDav::start().await;
+        let other = device("laptop-b", Some("laptop")).await;
+        other.seed("5a", "Max", "gültig").await;
+        synced(other.sync(&dav).await.unwrap());
+
+        dav.put_raw("snapshot_kaputt.json", b"{nicht json");
+        let mut bad: serde_json::Value =
+            serde_json::from_slice(&dav.get("snapshot_laptop-b.json").unwrap()).unwrap();
+        bad["data"]["device_id"] = serde_json::json!("manipuliert");
+        dav.put_raw("snapshot_manipuliert.json", bad.to_string().as_bytes());
+        dav.put_raw("changeset_laptop-b_20250101_000000.dat", b"alt");
+        dav.put_raw("notizen.txt", b"egal");
+
+        let me = device("laptop-a", Some("laptop")).await;
+        let r = synced(me.sync(&dav).await.unwrap());
+        assert!(r.inserted >= 3);
+        assert_eq!(me.observation_texts().await, vec!["gültig".to_string()]);
+        // Fremde Dateien bleiben unangetastet
+        for n in [
+            "snapshot_kaputt.json",
+            "changeset_laptop-b_20250101_000000.dat",
+            "notizen.txt",
+        ] {
+            assert!(dav.names().contains(&n.to_string()), "{n}");
+        }
+        // Kaputte Dateien werden beim nächsten Mal erneut versucht (kein ETag gemerkt)
+        let etags = me.db.lock().await.get_remote_etags().await.unwrap();
+        assert!(etags.contains_key("snapshot_laptop-b.json"));
+        assert!(!etags.contains_key("snapshot_kaputt.json"));
+        assert!(!etags.contains_key("snapshot_manipuliert.json"));
+    }
+
+    #[tokio::test]
+    async fn test_unchanged_state_is_not_reuploaded() {
+        let dav = FakeDav::start().await;
+        let a = device("laptop-a", Some("laptop")).await;
+        let b = device("laptop-b", Some("laptop")).await;
+        a.seed("5a", "Max", "Text").await;
+        synced(a.sync(&dav).await.unwrap());
+        synced(b.sync(&dav).await.unwrap());
+        synced(a.sync(&dav).await.unwrap());
+
+        dav.clear_log();
+        synced(a.sync(&dav).await.unwrap());
+        assert_eq!(dav.count("PUT"), 0, "kein Hochladen ohne Änderung");
+        assert_eq!(
+            dav.count("GET"),
+            0,
+            "unveränderte fremde Datei nicht erneut geladen"
+        );
+
+        // Nach einer Änderung wird wieder hochgeladen
+        a.seed("5b", "Erika", "Neu").await;
+        synced(a.sync(&dav).await.unwrap());
+        assert_eq!(dav.count("PUT"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_own_legacy_changesets_deleted() {
+        let dav = FakeDav::start().await;
+        let a = device("laptop-a", Some("laptop")).await;
+        dav.put_raw("changeset_laptop-a_20250101_000000.dat", b"alt1");
+        dav.put_raw("changeset_laptop-a_20250102_000000.dat", b"alt2");
+        dav.put_raw("changeset_laptop-b_20250101_000000.dat", b"fremd");
+        synced(a.sync(&dav).await.unwrap());
+        assert_eq!(
+            dav.names(),
+            vec![
+                "changeset_laptop-b_20250101_000000.dat".to_string(),
+                "snapshot_laptop-a.json".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_propagates_between_devices() {
+        let dav = FakeDav::start().await;
+        let laptop = device("laptop-1", Some("laptop")).await;
+        let desktop = device("desktop-1", Some("desktop")).await;
+        let sid = laptop.seed("5a", "Max", "Text").await;
+        synced(laptop.sync(&dav).await.unwrap());
+        synced(desktop.sync(&dav).await.unwrap());
+        assert_eq!(
+            desktop.db.lock().await.get_students().await.unwrap().len(),
+            1
+        );
+
+        laptop
+            .db
+            .lock()
+            .await
+            .delete_student(sid, true)
+            .await
+            .unwrap();
+        synced(laptop.sync(&dav).await.unwrap());
+        let r = synced(desktop.sync(&dav).await.unwrap());
+        assert!(r.tombstoned >= 1);
+        let db = desktop.db.lock().await;
+        assert!(db.get_students().await.unwrap().is_empty());
+        assert!(db
+            .search_observations(None, None, None)
+            .await
+            .unwrap()
+            .is_empty());
+        drop(db);
+        // Löschvermerk vorhanden, ohne Inhalt
+        let rows = desktop.rows().await;
+        assert_eq!(rows.students.len(), 1);
+        assert!(rows.students[0].deleted_at.is_some());
+        assert_eq!(rows.students[0].first_name, "");
+        assert!(rows.observations.iter().all(|o| o.deleted_at.is_some()));
+    }
+
+    #[test]
+    fn test_newest_laptop_by_generated_at() {
+        let mk = |id: &str, role: Option<&str>, at: &str| Remote {
+            name: format!("snapshot_{id}.json"),
+            etag: None,
+            snap: Snapshot {
+                format: crate::snapshot::SNAPSHOT_FORMAT.into(),
+                schema_version: crate::snapshot::SNAPSHOT_SCHEMA_VERSION,
+                device_id: id.into(),
+                device_role: role.map(String::from),
+                device_name: None,
+                generated_at: at.into(),
+                rows: Default::default(),
+            },
+        };
+        let remotes = vec![
+            mk("l1", Some("laptop"), "2026-11-17T10:00:00.000Z"),
+            mk("d1", Some("desktop"), "2026-11-17T12:00:00.000Z"),
+            mk("l2", Some("laptop"), "2026-11-17T11:00:00.000Z"),
+            mk("x", None, "2026-11-17T13:00:00.000Z"),
+        ];
+        assert_eq!(newest_laptop(&remotes), Some(2));
+        assert_eq!(newest_laptop(&remotes[1..2]), None);
+    }
+
+    #[test]
+    fn test_outcome_serialization() {
+        let r = MergeReport {
+            inserted: 1,
+            updated: 2,
+            tombstoned: 3,
+            skipped: 4,
+            changes: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(SyncOutcome::Synced(r)).unwrap(),
+            serde_json::json!({"outcome": "synced", "report": {"inserted": 1, "updated": 2, "tombstoned": 3, "skipped": 4}})
+        );
+        assert_eq!(
+            serde_json::to_value(SyncOutcome::WaitingForLaptop).unwrap(),
+            serde_json::json!({"outcome": "waiting_for_laptop"})
+        );
+        assert_eq!(SyncOutcome::NoLaptopFound.as_str(), "no_laptop_found");
+        assert_eq!(SyncOutcome::NotConfigured.as_str(), "not_configured");
+    }
+
+    #[test]
+    fn test_role_suggestion() {
+        assert_eq!(role_suggestion(Some("notebook")), "laptop");
+        assert_eq!(role_suggestion(Some("computer")), "desktop");
+        assert_eq!(role_suggestion(None), "desktop");
+    }
+}
