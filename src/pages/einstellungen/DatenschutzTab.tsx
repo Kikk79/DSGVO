@@ -91,7 +91,7 @@ export function DatenschutzTab() {
             {
               label: 'Dabei übertragen',
               value:
-                'Beobachtungen der letzten 30 Tage mit Text, Kategorie, Schlagwörtern und Zeitpunkt. Schüler nur als interne Nummer, ohne Namen. Die Dateien liegen unverschlüsselt auf dem Server und werden dort nicht automatisch entfernt.',
+                'Alles: Klassen, Schüler mit Namen, Kategorien und Beobachtungen mit Text, Kategorie, Schlagwörtern und Zeitpunkt, außerdem Löschvermerke. Die Dateien liegen unverschlüsselt auf dem Server und werden dort nicht automatisch entfernt.',
             },
             {
               label: 'Dateien, die Sie erstellen',
@@ -130,8 +130,9 @@ export function DatenschutzTab() {
                 oder der Schülerakte, einen Schüler in seiner Schülerakte.
               </p>
               <p>
-                Was die App nicht für Sie erledigt: Kopien auf einem zweiten Gerät, auf dem Synchronisationsserver und in
-                Sicherungsdateien löschen Sie selbst. Einträge im Protokoll bleiben erhalten.
+                Bei eingerichteter Synchronisation überträgt die App Löschungen beim nächsten Abgleich auf Ihr anderes
+                Gerät. Was sie nicht für Sie erledigt: Kopien auf dem Synchronisationsserver und in Sicherungsdateien
+                löschen Sie selbst. Einträge im Protokoll bleiben erhalten.
               </p>
             </dd>
           </div>

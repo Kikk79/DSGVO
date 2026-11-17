@@ -24,6 +24,19 @@ const backupFile = JSON.stringify({
   data: { students: [], classes: [], observations: [], categories: [] },
 });
 
+const notConfigured = {
+  configured: false,
+  active: false,
+  last_sync: null,
+  url: null,
+  username: null,
+  clock_offset_ms: 0,
+  device_role: null,
+  first_sync_done: false,
+  last_outcome: null,
+};
+let syncStatus: Record<string, unknown> = notConfigured;
+
 function handlers(command: string): unknown {
   switch (command) {
     case 'get_categories':
@@ -31,7 +44,11 @@ function handlers(command: string): unknown {
     case 'search_observations':
       return [{ category: 'Sozialverhalten' }, { category: 'Sozialverhalten' }];
     case 'get_webdav_sync_status':
-      return { configured: false, active: false, last_sync: null, url: null, username: null };
+      return syncStatus;
+    case 'get_device_role':
+      return 'desktop';
+    case 'set_device_role':
+      return null;
     case 'get_database_path':
       return 'C:\\Users\\lehrkraft\\AppData\\Roaming\\schuelerbeobachtung\\observations.db';
     case 'get_device_config':
@@ -62,6 +79,7 @@ function renderAt(path: string) {
 }
 
 beforeEach(() => {
+  syncStatus = notConfigured;
   invokeMock.mockReset();
   invokeMock.mockImplementation((command: string) => Promise.resolve(handlers(command)));
   useAppStore.setState({
@@ -168,12 +186,58 @@ describe('EinstellungenPage', () => {
   it('erklärt die Synchronisation und bietet die Einrichtung an, wenn nichts eingerichtet ist', async () => {
     renderAt('/einstellungen/synchronisation');
     expect(await screen.findByText('Nicht eingerichtet')).toBeInTheDocument();
-    expect(screen.getByText('Löschungen werden nicht übertragen')).toBeInTheDocument();
+    expect(screen.queryByText('Löschungen werden nicht übertragen')).not.toBeInTheDocument();
+    expect(screen.getByRole('tabpanel')).toHaveTextContent(/einschließlich Löschungen/);
     expect(screen.queryByRole('button', { name: 'Jetzt synchronisieren' })).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Synchronisation einrichten' }));
     await userEvent.click(screen.getByRole('button', { name: 'Verbindung testen' }));
     expect(screen.getByText(/beginnend mit https:\/\//)).toBeInTheDocument();
     expect(invokeMock).not.toHaveBeenCalledWith('test_webdav_connection', expect.anything());
+  });
+
+  const configuredStatus = {
+    configured: true,
+    active: true,
+    last_sync: null,
+    url: 'https://cloud.example/dav/',
+    username: 'lehrkraft',
+    clock_offset_ms: 3000,
+    device_role: 'desktop',
+    first_sync_done: false,
+    last_outcome: 'waiting_for_laptop',
+  };
+
+  it('zeigt Geräterolle, Uhrabweichung und den Wartestatus des Desktops', async () => {
+    syncStatus = configuredStatus;
+    renderAt('/einstellungen/synchronisation');
+    const panel = await screen.findByRole('tabpanel');
+    expect(await within(panel).findByText('Warte auf den Stand vom Laptop')).toBeInTheDocument();
+    expect(panel).toHaveTextContent('Desktop');
+    expect(panel).toHaveTextContent('Rechneruhr weicht 3 Sekunden von der Serverzeit ab');
+  });
+
+  it('weist darauf hin, wenn kein Laptop gefunden wurde', async () => {
+    syncStatus = { ...configuredStatus, last_outcome: 'no_laptop_found' };
+    renderAt('/einstellungen/synchronisation');
+    expect(
+      await screen.findByText('Kein Laptop gefunden. Bitte auf dem Laptop einmal synchronisieren.'),
+    ).toBeInTheDocument();
+  });
+
+  it('ändert die Geräterolle über den Reiter', async () => {
+    syncStatus = { ...configuredStatus, device_role: 'laptop', first_sync_done: true, last_outcome: 'synced' };
+    renderAt('/einstellungen/synchronisation');
+    await userEvent.click(await screen.findByRole('button', { name: 'Rolle ändern' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Rolle speichern' }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('set_device_role', { role: 'desktop' }));
+  });
+
+  it('erstellt die Sicherung ohne Zeitraumauswahl', async () => {
+    renderAt('/einstellungen/daten');
+    expect(screen.queryByLabelText('Umfang')).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: 'Sicherung erstellen' }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('export_all_data'));
   });
 });

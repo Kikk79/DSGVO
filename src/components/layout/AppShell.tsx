@@ -19,6 +19,7 @@ const SYNC_REFRESH_MS = 60_000;
 function SyncStatusLink() {
   const sync = useAppStore((state) => state.webdavSync);
   const getWebDavSyncStatus = useAppStore((state) => state.getWebDavSyncStatus);
+  const deviceRole = useAppStore((state) => state.deviceRole);
 
   // Der Abgleich läuft im Hintergrund; die Anzeige wird regelmäßig aufgefrischt,
   // aber nicht während eines laufenden manuellen Abgleichs überschrieben.
@@ -43,6 +44,12 @@ function SyncStatusLink() {
   } else if (!sync.config.active) {
     icon = <CloudOff aria-hidden="true" className="h-3.5 w-3.5" />;
     text = 'Synchronisation angehalten';
+  } else if (sync.lastOutcome === 'no_laptop_found') {
+    icon = <AlertTriangle aria-hidden="true" className="h-3.5 w-3.5 text-marker" />;
+    text = 'Kein Laptop gefunden. Bitte auf dem Laptop einmal synchronisieren.';
+  } else if (sync.lastOutcome === 'waiting_for_laptop' || (deviceRole === 'desktop' && sync.firstSyncDone === false)) {
+    icon = <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />;
+    text = 'Warte auf den Stand vom Laptop';
   } else if (sync.lastSyncTime) {
     icon = <Check aria-hidden="true" className="h-3.5 w-3.5" />;
     text = `Synchronisiert: ${formatRecent(sync.lastSyncTime)}`;

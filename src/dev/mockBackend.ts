@@ -147,6 +147,10 @@ interface MockState {
   device: { device_type: string; device_name: string | null };
   databasePath: string;
   webdav: { url: string; username: string; active: boolean; lastSync: string | null } | null;
+  /** Geräterolle; null bis zur Pflichtauswahl. Nur im Speicher: nach einem Neuladen wieder null. */
+  deviceRole: 'laptop' | 'desktop' | null;
+  firstSyncDone: boolean;
+  lastOutcome: string | null;
   nextId: number;
 }
 
@@ -184,6 +188,9 @@ function createState(empty: boolean): MockState {
     device: { device_type: 'notebook', device_name: 'Lehrer-Notebook' },
     databasePath: '/home/lehrkraft/.local/share/schuelerbeobachtung/observations.db',
     webdav: null,
+    deviceRole: null,
+    firstSyncDone: false,
+    lastOutcome: null,
     nextId: 1,
   };
   const id = () => state.nextId++;
@@ -760,18 +767,16 @@ function createHandlers(state: MockState) {
       throw 'Unsupported export format';
     },
 
-    export_all_data: (args) => {
-      const daysBack = arg<number>(args, 'daysBack');
-      const cutoff = daysBack && daysBack > 0 ? new Date(Date.now() - daysBack * 86_400_000).toISOString() : null;
-      // Gleiche Form wie export_all_data in main.rs
-      const observations = cutoff ? state.observations.filter((item) => item.created_at >= cutoff) : state.observations;
+    export_all_data: () => {
+      // Gleiche Form wie export_all_data in main.rs: immer der volle Stand
+      const observations = state.observations;
       const categories = state.categories.filter((item) => item.is_active);
       return JSON.stringify({
         format: 'full_export',
         version: '1.1',
         timestamp: now(),
         export_scope: {
-          days_back: daysBack ?? null,
+          days_back: null,
           total_students: state.students.length,
           total_classes: state.classes.length,
           total_observations: observations.length,
@@ -820,7 +825,19 @@ function createHandlers(state: MockState) {
       last_sync: state.webdav?.lastSync ?? null,
       url: state.webdav?.url ?? null,
       username: state.webdav?.username ?? null,
+      clock_offset_ms: 3200,
+      device_role: state.deviceRole,
+      first_sync_done: state.firstSyncDone,
+      last_outcome: state.lastOutcome,
     }),
+    get_device_role: () => state.deviceRole,
+    get_device_role_suggestion: () => (state.device.device_type === 'notebook' ? 'laptop' : 'desktop'),
+    set_device_role: (args) => {
+      const role = required<string>(args, 'role');
+      if (role !== 'laptop' && role !== 'desktop') throw `Invalid device role: ${role}`;
+      state.deviceRole = role;
+      return null;
+    },
     configure_webdav: (args) => {
       state.webdav = {
         url: required<string>(args, 'url'),
@@ -836,9 +853,18 @@ function createHandlers(state: MockState) {
       return true;
     },
     trigger_manual_sync: () => {
-      if (!state.webdav) throw 'WebDAV sync not configured';
+      if (!state.webdav) return { outcome: 'not_configured' };
+      // Desktop vor dem ersten Abgleich: beim ersten Versuch liegt noch kein Laptop-Stand vor.
+      if (state.deviceRole === 'desktop' && !state.firstSyncDone) {
+        if (state.lastOutcome !== 'waiting_for_laptop') {
+          state.lastOutcome = 'waiting_for_laptop';
+          return { outcome: 'waiting_for_laptop' };
+        }
+        state.firstSyncDone = true;
+      }
       state.webdav.lastSync = now();
-      return 'Manual sync completed';
+      state.lastOutcome = 'synced';
+      return { outcome: 'synced', report: { inserted: 12, updated: 3, tombstoned: 1, skipped: 0 } };
     },
     disable_webdav_sync: () => {
       if (state.webdav) state.webdav.active = false;

@@ -12,19 +12,11 @@ import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Dialog } from '../../components/ui/Dialog';
 import { Field } from '../../components/ui/Field';
 import { Input } from '../../components/ui/Input';
-import { Select } from '../../components/ui/Select';
 import { SegmentedControl } from '../../components/ui/SegmentedControl';
 import { Spinner } from '../../components/ui/Spinner';
 import { useToast } from '../../components/ui/toastContext';
 import { FactList, InlineError, Notice, PathText, Section } from './parts';
 import { plural, readBackup, readFileText, type BackupSummary } from './backup';
-
-const BACKUP_RANGES = [
-  { value: '-1', label: 'Alle Beobachtungen (empfohlen)' },
-  { value: '30', label: 'Beobachtungen der letzten 30 Tage' },
-  { value: '90', label: 'Beobachtungen der letzten 90 Tage' },
-  { value: '365', label: 'Beobachtungen des letzten Jahres' },
-];
 
 /** Reiter „Daten“: Sicherung erstellen/einspielen, Speicherort, Gerät. */
 export function DatenTab() {
@@ -40,7 +32,6 @@ export function DatenTab() {
 
 function BackupSection() {
   const toast = useToast();
-  const [range, setRange] = useState('-1');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,8 +39,7 @@ function BackupSection() {
     setBusy(true);
     setError(null);
     try {
-      const daysBack = Number(range);
-      const content = await invoke<string>('export_all_data', { daysBack });
+      const content = await invoke<string>('export_all_data');
       downloadText(`schuelerbeobachtung-sicherung-${isoDate()}.json`, content, MIME_JSON);
       const summary = readBackup('', content);
       const parts = [
@@ -78,15 +68,6 @@ function BackupSection() {
       }
     >
       <div className="flex max-w-measure flex-wrap items-end gap-3">
-        <Field label="Umfang" className="w-80 max-w-full">
-          <Select value={range} onChange={(event) => setRange(event.target.value)}>
-            {BACKUP_RANGES.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
-        </Field>
         <Button icon={<Download />} onClick={() => void handleBackup()} loading={busy}>
           Sicherung erstellen
         </Button>
