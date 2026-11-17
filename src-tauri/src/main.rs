@@ -1111,7 +1111,7 @@ async fn test_webdav_connection(
     password: String,
 ) -> Result<bool, String> {
     let client = webdav_sync::WebDavClient::new(url, username, password);
-    client.test_connection().await.map_err(|e| e.to_string())
+    client.test_connection().await.map(|r| r.value).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
