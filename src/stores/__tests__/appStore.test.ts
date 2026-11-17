@@ -3,7 +3,7 @@ import { useAppStore } from '../appStore';
 import { act, renderHook } from '@testing-library/react';
 
 // Mock Tauri
-const mockInvoke = vi.fn();
+const mockInvoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: mockInvoke,
 }));
@@ -481,6 +481,122 @@ describe('AppStore', () => {
       expect(observation).toBe(null);
       expect(result.current.loading).toBe(false);
       expect(result.current.error).toBe(null);
+    });
+
+    it('should update observation successfully', async () => {
+      const untouchedObservation = {
+        id: 2,
+        student_id: 1,
+        author_id: 1,
+        category: 'Fachlich',
+        text: 'Test 2',
+        tags: [],
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+        source_device_id: 'test-device-1',
+      };
+
+      // Set up initial observations
+      act(() => {
+        useAppStore.setState({
+          observations: [
+            {
+              id: 1,
+              student_id: 1,
+              author_id: 1,
+              category: 'Sozial',
+              text: 'Original text',
+              tags: ['old'],
+              created_at: '2024-01-01T00:00:00Z',
+              updated_at: '2024-01-01T00:00:00Z',
+              source_device_id: 'test-device-1',
+            },
+            untouchedObservation,
+          ],
+        });
+      });
+
+      const updatedObservation = {
+        id: 1,
+        student_id: 1,
+        author_id: 1,
+        category: 'Fachlich',
+        text: 'Edited text',
+        tags: '["edited", "test"]',
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-02-01T00:00:00Z',
+        source_device_id: 'test-device-1',
+      };
+
+      mockInvoke.mockResolvedValue(updatedObservation);
+
+      const { result } = renderHook(() => useAppStore());
+
+      let returned: any;
+      await act(async () => {
+        returned = await result.current.updateObservation(1, {
+          category: 'Fachlich',
+          text: 'Edited text',
+          tags: ['edited', 'test'],
+        });
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith('update_observation', {
+        observationId: 1,
+        category: 'Fachlich',
+        text: 'Edited text',
+        tags: ['edited', 'test'],
+      });
+
+      // Returned observation has tags parsed from JSON string to array
+      const expectedObservation = { ...updatedObservation, tags: ['edited', 'test'] };
+      expect(returned).toEqual(expectedObservation);
+
+      // Matching entry is replaced in place, the other one is untouched
+      expect(result.current.observations).toEqual([expectedObservation, untouchedObservation]);
+      expect(result.current.loading).toBe(false);
+      expect(result.current.error).toBe(null);
+    });
+
+    it('should handle update observation error', async () => {
+      const existingObservation = {
+        id: 1,
+        student_id: 1,
+        author_id: 1,
+        category: 'Sozial',
+        text: 'Original text',
+        tags: ['old'],
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+        source_device_id: 'test-device-1',
+      };
+
+      act(() => {
+        useAppStore.setState({ observations: [existingObservation] });
+      });
+
+      mockInvoke.mockRejectedValue(new Error('Observation not found'));
+
+      const { result } = renderHook(() => useAppStore());
+
+      let thrown: unknown = null;
+      await act(async () => {
+        try {
+          await result.current.updateObservation(1, {
+            category: 'Sozial',
+            text: 'Edited text',
+            tags: [],
+          });
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      // Error is stored and rethrown, local state is left unchanged
+      expect(thrown).toBeInstanceOf(Error);
+      expect(result.current.error).toBe('Failed to update observation: Error: Observation not found');
+      expect(result.current.loading).toBe(false);
+      expect(result.current.observations).toEqual([existingObservation]);
     });
   });
 

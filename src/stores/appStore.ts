@@ -196,6 +196,8 @@ interface AppState {
   // eslint-disable-next-line no-unused-vars
   getObservation: (observation_id: number) => Promise<Observation | null>;
   // eslint-disable-next-line no-unused-vars
+  updateObservation: (observation_id: number, data: { category: string; text: string; tags: string[] }) => Promise<Observation>;
+  // eslint-disable-next-line no-unused-vars
   setError: (error: string | null) => void;
   // eslint-disable-next-line no-unused-vars
   setLoading: (loading: boolean) => void;
@@ -522,6 +524,36 @@ export const useAppStore = create<AppState>((set, get) => ({
       return observation;
     } catch (err) {
       set({ error: `Failed to get observation: ${err}`, loading: false });
+      throw err;
+    }
+  },
+
+  // Update an existing observation
+  updateObservation: async (observation_id, data) => {
+    set({ loading: true, error: null });
+    try {
+      const rawObservation = await invoke('update_observation', {
+        observationId: observation_id,
+        category: data.category,
+        text: data.text,
+        tags: data.tags,
+      }) as any;
+
+      // Transform observation to parse tags from JSON string to array
+      const observation: Observation = {
+        ...rawObservation,
+        tags: typeof rawObservation.tags === 'string' ?
+          (rawObservation.tags.trim() ? JSON.parse(rawObservation.tags) : []) :
+          (rawObservation.tags || [])
+      };
+
+      // Replace the matching observation in local state
+      const { observations } = get();
+      const updatedObservations = observations.map(obs => obs.id === observation_id ? observation : obs);
+      set({ observations: updatedObservations, loading: false, error: null });
+      return observation;
+    } catch (err) {
+      set({ error: `Failed to update observation: ${err}`, loading: false });
       throw err;
     }
   },

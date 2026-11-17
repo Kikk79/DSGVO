@@ -2,20 +2,92 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Gestaltungssystem „Klassenbuch“
+ * Tafel (Navigation) · Papier (Inhalt) · Marker (Hervorhebung) · Rotstift (Löschen, Fehler)
+ *
+ * Farben stehen als RGB-Kanäle in Variablen und werden über tailwind.config.js
+ * als Klassen bereitgestellt (bg-paper, text-ink-muted, border-line, bg-tafel-800 …).
+ */
+:root {
+  --c-paper: 245 241 232;        /* #F5F1E8  Seitenhintergrund */
+  --c-paper-deep: 236 230 216;   /* #ECE6D8  Hover-Fläche auf Papier */
+  --c-surface: 252 250 245;      /* #FCFAF5  Dialoge, Eingabefelder */
+  --c-ink: 30 27 22;             /* #1E1B16  Text */
+  --c-ink-muted: 106 97 86;      /* #6A6156  Nebentext, Metadaten */
+  --c-line: 222 214 199;         /* #DED6C7  Haarlinien */
+  --c-line-strong: 143 133 117;  /* #8F8575  Ränder von Bedienelementen (3:1) */
+
+  --c-tafel-900: 20 52 43;       /* #14342B  Seitenleiste */
+  --c-tafel-800: 27 67 55;       /* #1B4337  Primäre Schaltflächen */
+  --c-tafel-700: 35 83 69;       /* #235345  Hover, Links */
+  --c-tafel-600: 46 106 88;      /* #2E6A58  Linien auf der Tafel */
+  --c-tafel-100: 220 232 226;    /* #DCE8E2  Grüne Tönung auf Papier */
+  --c-kreide: 241 237 224;       /* #F1EDE0  Text auf der Tafel */
+  --c-kreide-muted: 169 189 179; /* #A9BDB3  Nebentext auf der Tafel */
+
+  --c-marker: 242 197 61;        /* #F2C53D  Hervorhebung, aktiv, Fokus */
+  --c-marker-soft: 251 239 194;  /* #FBEFC2  Markierte Fläche */
+
+  --c-rotstift: 185 58 38;       /* #B93A26  Löschen, Fehler */
+  --c-rotstift-dark: 156 46 29;  /* #9C2E1D  Fehlertext, Hover */
+  --c-rotstift-soft: 246 221 214;/* #F6DDD6  Fehlerfläche */
+
+  /* Fokusring: auf Papier Tinte mit Marker-Kern, auf der Tafel Marker */
+  --focus-outer: rgb(var(--c-ink));
+  --focus-inner: rgb(var(--c-marker));
+}
+
+.on-tafel {
+  --focus-outer: rgb(var(--c-marker));
+  --focus-inner: rgb(var(--c-tafel-900));
+}
+
 @layer base {
   html {
     font-size: 16px;
+    -webkit-text-size-adjust: 100%;
   }
-  
+
   body {
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-    line-height: 1.6;
+    @apply bg-paper font-sans text-ui text-ink antialiased;
+    font-feature-settings: 'kern', 'liga';
+  }
+
+  /* Fraunces: weiche Formen, keine verspielten Alternativglyphen, Versalziffern */
+  .font-display {
+    font-variation-settings: 'SOFT' 40, 'WONK' 0;
+    font-optical-sizing: auto;
+    font-variant-numeric: lining-nums;
+  }
+
+  ::selection {
+    background: rgb(var(--c-marker) / 0.55);
+    color: rgb(var(--c-ink));
+  }
+
+  /* Sichtbarer Fokus für alles, was per Tastatur erreichbar ist */
+  :focus {
+    outline: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus-outer);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 2px var(--focus-inner);
+  }
+
+  /* Dünne, warme Bildlaufleisten */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--c-line-strong) / 0.6) transparent;
   }
 
   /* High contrast mode support */
-  @media (prefers-contrast: high) {
+  @media (prefers-contrast: more) {
     :root {
-      --tw-border-opacity: 1;
+      --c-line: 143 133 117;
+      --c-ink-muted: 74 67 58;
     }
   }
 
@@ -36,62 +108,38 @@
 }
 
 @layer components {
-  /* Focus styles for accessibility */
-  .focus-ring {
-    @apply focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2;
+  /* Metadaten: klein, Versalien, gesperrt (Datumsangaben in Listen, Zähler, Spaltenköpfe) */
+  .meta {
+    @apply text-meta uppercase text-ink-muted;
   }
 
-  /* Button variants */
-  .btn-primary {
-    @apply bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition-colors focus-ring;
+  /* Textlink auf Papier */
+  .link {
+    @apply rounded-sm font-medium text-tafel-700 underline decoration-tafel-700/40 underline-offset-[3px] transition-colors hover:text-tafel-900 hover:decoration-tafel-900;
   }
 
-  .btn-secondary {
-    @apply bg-gray-200 hover:bg-gray-300 text-gray-900 font-medium py-2 px-4 rounded-md transition-colors focus-ring;
+  /* Abschnittsüberschrift mit Haarlinie darunter */
+  .section-head {
+    @apply flex items-baseline justify-between gap-4 border-b border-ink pb-2;
   }
 
-  .btn-danger {
-    @apply bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-md transition-colors focus-ring;
+  /* Gestaffeltes Einblenden der Seiteninhalte beim Routenwechsel */
+  .page-enter > * {
+    @apply animate-rise;
   }
+  .page-enter > *:nth-child(2) { animation-delay: 50ms; }
+  .page-enter > *:nth-child(3) { animation-delay: 100ms; }
+  .page-enter > *:nth-child(4) { animation-delay: 150ms; }
+  .page-enter > *:nth-child(5) { animation-delay: 200ms; }
+  .page-enter > *:nth-child(n + 6) { animation-delay: 250ms; }
 
-  /* Form elements */
-  .input-field {
-    @apply w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500;
-  }
-
-  .textarea-field {
-    @apply w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 min-h-[100px];
-    resize: vertical;
-  }
-
-  .select-field {
-    @apply w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white;
-  }
-
-  /* Card styles */
-  .card {
-    @apply bg-white shadow-sm border border-gray-200 rounded-lg p-6;
-  }
-
-  .card-header {
-    @apply flex justify-between items-center mb-4;
-  }
-
-  /* Status indicators */
-  .status-green {
-    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800;
-  }
-
-  .status-yellow {
-    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800;
-  }
-
-  .status-red {
-    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800;
+  /* Eintragsliste: linierte Zeilen mit Heftrand (siehe ObservationEntry) */
+  .entry-list {
+    @apply border-t border-line;
   }
 }
 
-/* Keyboard navigation improvements */
+/* Screenreader-only */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -104,20 +152,142 @@
   border: 0;
 }
 
+/*
+ * FullCalendar im Klassenbuch-Stil.
+ * Die Kalenderseite muss nur <FullCalendar /> rendern; Farben, Schrift und
+ * Schaltflächen kommen von hier.
+ */
+.fc {
+  --fc-page-bg-color: rgb(var(--c-paper));
+  --fc-neutral-bg-color: rgb(var(--c-paper-deep));
+  --fc-neutral-text-color: rgb(var(--c-ink-muted));
+  --fc-border-color: rgb(var(--c-line));
+  --fc-today-bg-color: rgb(var(--c-marker-soft) / 0.6);
+  --fc-now-indicator-color: rgb(var(--c-rotstift));
+  --fc-highlight-color: rgb(var(--c-tafel-100) / 0.6);
+  --fc-non-business-color: rgb(var(--c-paper-deep) / 0.5);
+  --fc-list-event-hover-bg-color: rgb(var(--c-paper-deep));
+  --fc-more-link-bg-color: rgb(var(--c-paper-deep));
+  --fc-more-link-text-color: rgb(var(--c-ink));
+  --fc-event-bg-color: rgb(var(--c-tafel-100));
+  --fc-event-border-color: rgb(var(--c-tafel-700));
+  --fc-event-text-color: rgb(var(--c-ink));
+  --fc-event-selected-overlay-color: rgb(var(--c-ink) / 0.12);
+  --fc-button-text-color: rgb(var(--c-ink));
+  --fc-button-bg-color: transparent;
+  --fc-button-border-color: rgb(var(--c-line-strong));
+  --fc-button-hover-bg-color: rgb(var(--c-paper-deep));
+  --fc-button-hover-border-color: rgb(var(--c-ink));
+  --fc-button-active-bg-color: rgb(var(--c-tafel-800));
+  --fc-button-active-border-color: rgb(var(--c-tafel-800));
+  --fc-small-font-size: 0.8125rem;
+  font-family: inherit;
+  font-size: 0.9375rem;
+}
+
+.fc .fc-toolbar-title {
+  font-family: 'Fraunces Variable', Georgia, serif;
+  font-variation-settings: 'SOFT' 40, 'WONK' 0;
+  font-size: 1.5rem;
+  font-weight: 560;
+  letter-spacing: -0.01em;
+}
+
+.fc .fc-button {
+  border-radius: 6px;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  box-shadow: none !important;
+  text-transform: none;
+  transition: background-color 120ms, border-color 120ms, color 120ms;
+}
+
+.fc .fc-button-primary:not(:disabled).fc-button-active,
+.fc .fc-button-primary:not(:disabled):active {
+  color: rgb(var(--c-kreide));
+}
+
+.fc .fc-button-primary:disabled {
+  opacity: 0.45;
+}
+
+.fc .fc-button:focus-visible {
+  outline: 2px solid var(--focus-outer);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--focus-inner) !important;
+}
+
+.fc .fc-col-header-cell-cushion,
+.fc .fc-list-day-cushion,
+.fc .fc-timegrid-axis-cushion,
+.fc .fc-timegrid-slot-label-cushion {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgb(var(--c-ink-muted));
+  text-decoration: none;
+}
+
+.fc .fc-col-header-cell-cushion {
+  padding: 0.5rem 0.25rem;
+}
+
+.fc .fc-daygrid-day-number {
+  font-family: 'Fraunces Variable', Georgia, serif;
+  font-variant-numeric: lining-nums;
+  font-size: 0.9375rem;
+  color: rgb(var(--c-ink));
+  padding: 0.375rem 0.5rem;
+  text-decoration: none;
+}
+
+.fc .fc-day-other .fc-daygrid-day-number {
+  color: rgb(var(--c-ink-muted));
+}
+
+.fc .fc-day-today .fc-daygrid-day-number {
+  font-weight: 700;
+}
+
+.fc .fc-event {
+  border-radius: 4px;
+  border-width: 0 0 0 3px;
+  padding: 1px 4px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.fc .fc-daygrid-event-dot,
+.fc .fc-list-event-dot {
+  border-color: rgb(var(--c-tafel-700));
+}
+
+.fc .fc-list {
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+}
+
+.fc .fc-list-day-cushion {
+  background: rgb(var(--c-paper-deep));
+}
+
+.fc .fc-scrollgrid {
+  border-radius: 0;
+}
+
 /* Print styles */
 @media print {
   .no-print {
     display: none !important;
   }
-  
+
   body {
+    background: #fff;
     font-size: 12pt;
     line-height: 1.4;
-  }
-  
-  .card {
-    break-inside: avoid;
-    border: 1px solid #000;
-    margin-bottom: 1rem;
   }
 }
