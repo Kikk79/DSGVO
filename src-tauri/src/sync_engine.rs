@@ -207,6 +207,9 @@ pub async fn run_sync(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let mut remotes = Vec::new();
+    // Eine fremde Datei, die sich nicht laden lässt, blockiert den Abgleich nicht; sie könnte
+    // aber ein (neuerer) Laptop-Stand sein → der erste Abgleich eines Desktops wartet dann.
+    let mut download_failed = false;
     for entry in entries
         .iter()
         .filter(|e| is_snapshot_file(&e.name) && e.name != own_name)
@@ -218,11 +221,18 @@ pub async fn run_sync(
         if unchanged && !first_desktop_sync {
             continue;
         }
-        let bytes = client
-            .download(&entry.name)
-            .await
-            .with_context(|| format!("{} konnte nicht geladen werden", entry.name))?
-            .value;
+        let bytes = match client.download(&entry.name).await {
+            Ok(r) => r.value,
+            Err(e) => {
+                eprintln!(
+                    "Abgleich: {} konnte nicht geladen werden, übersprungen: {:#}",
+                    entry.name, e
+                );
+                etags.remove(&entry.name);
+                download_failed = true;
+                continue;
+            }
+        };
         match decode(&bytes) {
             Ok(snap) if snap.device_id == device_id => {
                 eprintln!(
@@ -247,7 +257,19 @@ pub async fn run_sync(
     let mut total = MergeReport::default();
     {
         let db = db.lock().await;
-        if first_desktop_sync {
+        // Rolle und ersten Abgleich unter der Sperre erneut lesen: wurde die Rolle während des
+        // Netzwerk-Schritts geändert, gilt dieser Durchlauf nicht (nichts ersetzen/ändern).
+        let role_now = db.get_device_role().await?;
+        if role_now.as_deref() != Some(role.as_str()) {
+            anyhow::bail!(
+                "Geräterolle wurde während des Abgleichs geändert; Abgleich wird wiederholt"
+            );
+        }
+        let first_done_now = db.is_first_sync_done().await?;
+        if first_desktop_sync && !first_done_now {
+            if download_failed {
+                return Ok(SyncOutcome::WaitingForLaptop);
+            }
             let Some(laptop_idx) = newest_laptop(&remotes) else {
                 let any_desktop = remotes
                     .iter()
@@ -286,7 +308,7 @@ pub async fn run_sync(
                 merge_one(&db, remote, audit, &mut total, &mut etags).await;
             }
         }
-        if !first_done {
+        if !first_done_now {
             db.set_first_sync_done().await?;
         }
         db.set_remote_etags(&etags).await?;
@@ -356,6 +378,18 @@ mod tests {
         files: BTreeMap<String, (Vec<u8>, u64)>,
         version: u64,
         log: Vec<(String, String)>,
+        /// GET auf diese Dateien → 403.
+        fail: std::collections::HashSet<String>,
+        /// GET meldet sich hier an und wartet auf Freigabe.
+        gate: Option<Arc<Gate>>,
+        /// Verzögerung jedes GET (ms).
+        get_delay_ms: u64,
+    }
+
+    #[derive(Default)]
+    struct Gate {
+        arrived: tokio::sync::Notify,
+        release: tokio::sync::Notify,
     }
 
     #[derive(Clone)]
@@ -366,7 +400,10 @@ mod tests {
 
     impl FakeDav {
         async fn start() -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            Self::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap())
+        }
+
+        fn start_on(listener: TcpListener) -> Self {
             let addr = listener.local_addr().unwrap();
             let state = Arc::new(std::sync::Mutex::new(DavState::default()));
             let st = state.clone();
@@ -461,6 +498,19 @@ mod tests {
             body.extend_from_slice(&chunk[..n]);
         }
 
+        if method == "GET" {
+            let (gate, delay) = {
+                let s = state.lock().unwrap();
+                (s.gate.clone(), s.get_delay_ms)
+            };
+            if let Some(gate) = gate {
+                gate.arrived.notify_one();
+                gate.release.notified().await;
+            }
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+        }
         let (status, resp_body): (u16, Vec<u8>) = {
             let mut s = state.lock().unwrap();
             s.log.push((method.clone(), path.clone()));
@@ -480,6 +530,7 @@ mod tests {
                     xml.push_str("</d:multistatus>");
                     (207, xml.into_bytes())
                 }
+                "GET" if s.fail.contains(&name) => (403, Vec::new()),
                 "GET" => match s.files.get(&name) {
                     Some((d, _)) => (200, d.clone()),
                     None => (404, Vec::new()),
@@ -911,6 +962,156 @@ mod tests {
         assert!(rows.students[0].deleted_at.is_some());
         assert_eq!(rows.students[0].first_name, "");
         assert!(rows.observations.iter().all(|o| o.deleted_at.is_some()));
+    }
+
+    fn manager(dav_url: &str, lock: &Arc<Mutex<()>>) -> Arc<crate::webdav_sync::WebDavSyncManager> {
+        let m = Arc::new(crate::webdav_sync::WebDavSyncManager::new(lock.clone()));
+        m.set_credentials(dav_url.to_string(), "u".into(), "p".into());
+        m
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_syncs_replace_only_once() {
+        let dav = FakeDav::start().await;
+        let laptop = device("laptop-1", Some("laptop")).await;
+        laptop.seed("5a", "Max", "vom Laptop").await;
+        synced(laptop.sync(&dav).await.unwrap());
+
+        let desktop = device("desktop-1", Some("desktop")).await;
+        desktop.seed("alt", "Veraltet", "veraltet").await;
+        dav.state.lock().unwrap().get_delay_ms = 150;
+
+        // Alter Manager (Startabgleich) und neuer Manager (Einstellungen erneut gespeichert)
+        let lock = Arc::new(Mutex::new(()));
+        let old = manager(&dav.url, &lock);
+        let new = manager(&dav.url, &lock);
+        let (a, b) = tokio::join!(
+            old.sync_now(&desktop.db, None),
+            new.sync_now(&desktop.db, None)
+        );
+        synced(a.unwrap());
+        synced(b.unwrap());
+        assert_eq!(desktop.backups().len(), 1, "genau eine Ersetzung");
+        assert_eq!(
+            desktop.observation_texts().await,
+            vec!["vom Laptop".to_string()]
+        );
+        assert_eq!(desktop.rows().await, laptop.rows().await);
+    }
+
+    #[tokio::test]
+    async fn test_role_change_to_laptop_mid_sync_prevents_replace() {
+        let dav = FakeDav::start().await;
+        let laptop = device("laptop-1", Some("laptop")).await;
+        laptop.seed("5a", "Max", "vom Laptop").await;
+        synced(laptop.sync(&dav).await.unwrap());
+
+        let desktop = Arc::new(device("desktop-1", Some("desktop")).await);
+        desktop.seed("alt", "Veraltet", "vorhanden").await;
+        let before = desktop.rows().await;
+        let gate = Arc::new(Gate::default());
+        dav.state.lock().unwrap().gate = Some(gate.clone());
+
+        let (d, client) = (desktop.clone(), dav.client());
+        let run = tokio::spawn(async move { run_sync(&d.db, &client, None).await });
+        // Abgleich hängt im Herunterladen; Rolle wird jetzt auf Laptop geändert
+        gate.arrived.notified().await;
+        desktop
+            .db
+            .lock()
+            .await
+            .set_device_role("laptop")
+            .await
+            .unwrap();
+        dav.state.lock().unwrap().gate = None;
+        gate.release.notify_one();
+
+        assert!(run.await.unwrap().is_err());
+        assert_eq!(desktop.rows().await, before, "nichts ersetzt");
+        assert!(desktop.backups().is_empty());
+        assert!(!desktop.db.lock().await.is_first_sync_done().await.unwrap());
+
+        // Nächster Durchlauf als Laptop: zusammenführen, eigene Daten bleiben
+        synced(desktop.sync(&dav).await.unwrap());
+        assert_eq!(
+            desktop.observation_texts().await,
+            vec!["vom Laptop".to_string(), "vorhanden".to_string()]
+        );
+        assert!(desktop.backups().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_failing_foreign_download_does_not_block_sync() {
+        let dav = FakeDav::start().await;
+        let other = device("laptop-b", Some("laptop")).await;
+        other.seed("5a", "Max", "gültig").await;
+        synced(other.sync(&dav).await.unwrap());
+        dav.put_raw("snapshot_gesperrt.json", b"egal");
+        dav.state
+            .lock()
+            .unwrap()
+            .fail
+            .insert("snapshot_gesperrt.json".into());
+
+        // Laptop: Datei übersprungen, Rest zusammengeführt, eigener Stand hochgeladen
+        let me = device("laptop-a", Some("laptop")).await;
+        me.seed("6b", "Erika", "eigene").await;
+        synced(me.sync(&dav).await.unwrap());
+        assert_eq!(
+            me.observation_texts().await,
+            vec!["eigene".to_string(), "gültig".to_string()]
+        );
+        assert!(dav.names().contains(&"snapshot_laptop-a.json".to_string()));
+        let etags = me.db.lock().await.get_remote_etags().await.unwrap();
+        assert!(!etags.contains_key("snapshot_gesperrt.json"));
+        // Wiederholung: wird erneut versucht, blockiert weiterhin nicht
+        dav.clear_log();
+        synced(me.sync(&dav).await.unwrap());
+        assert_eq!(dav.count("GET"), 1);
+
+        // Desktop beim ersten Abgleich: unlesbare Datei könnte ein Laptop sein → warten
+        let desktop = device("desktop-1", Some("desktop")).await;
+        desktop.seed("alt", "Veraltet", "veraltet").await;
+        let before = desktop.rows().await;
+        dav.clear_log();
+        assert_eq!(
+            desktop.sync(&dav).await.unwrap(),
+            SyncOutcome::WaitingForLaptop
+        );
+        assert_eq!(dav.count("PUT"), 0);
+        assert_eq!(desktop.rows().await, before);
+        assert!(desktop.backups().is_empty());
+
+        // Datei wieder lesbar (hier: entfernt) → Desktop übernimmt
+        dav.state
+            .lock()
+            .unwrap()
+            .files
+            .remove("snapshot_gesperrt.json");
+        synced(desktop.sync(&dav).await.unwrap());
+        assert!(desktop.db.lock().await.is_first_sync_done().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_manager_from_stored_credentials_retries_when_server_returns() {
+        let laptop = device("laptop-1", Some("laptop")).await;
+        laptop.seed("5a", "Max", "Text").await;
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let url = format!("http://127.0.0.1:{}/dav", port);
+        let m = manager(&url, &Arc::new(Mutex::new(())));
+        // Server beim Start nicht erreichbar: Manager trotzdem eingerichtet, Fehler gemeldet
+        assert!(m.is_configured());
+        assert!(m.sync_now(&laptop.db, None).await.is_err());
+        assert_eq!(m.get_last_outcome().as_deref(), Some("error"));
+
+        // Server wieder da → nächster Durchlauf gelingt
+        let dav = FakeDav::start_on(TcpListener::bind(("127.0.0.1", port)).await.unwrap());
+        synced(m.sync_now(&laptop.db, None).await.unwrap());
+        assert_eq!(m.get_last_outcome().as_deref(), Some("synced"));
+        assert!(dav.names().contains(&"snapshot_laptop-1.json".to_string()));
     }
 
     #[test]

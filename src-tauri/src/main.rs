@@ -168,6 +168,8 @@ pub struct AppState {
     pub audit: Arc<audit::AuditLogger>,
     pub gdpr: Arc<gdpr::GdprManager>,
     pub webdav_sync: Arc<Mutex<Option<Arc<webdav_sync::WebDavSyncManager>>>>,
+    /// Ein Abgleich zur Zeit, über alle (auch ersetzte) Sync-Manager hinweg.
+    pub sync_run_lock: Arc<Mutex<()>>,
 }
 
 // Tauri commands
@@ -968,7 +970,9 @@ async fn configure_webdav(
         .await
         .map_err(|e| e.to_string())?;
 
-    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new());
+    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new(
+        state.sync_run_lock.clone(),
+    ));
     sync_manager
         .configure(url, username, password)
         .await
@@ -1155,6 +1159,7 @@ fn main() {
                 audit,
                 gdpr,
                 webdav_sync: Arc::new(Mutex::new(None)),
+                sync_run_lock: Arc::new(Mutex::new(())),
             };
 
             app.manage(state.clone());
@@ -1164,20 +1169,20 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let credentials = state.db.lock().await.get_webdav_credentials().await;
                 if let Ok(Some((url, username, password))) = credentials {
-                    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new());
-                    match sync_manager.configure(url, username, password).await {
-                        Ok(()) => {
-                            install_sync_manager(&state, Some(sync_manager.clone())).await;
-                            println!("WebDAV-Abgleich aus gespeicherten Zugangsdaten eingerichtet");
-                            sync_manager
-                                .sync_logged(&state.db, Some(&state.audit), "Start")
-                                .await;
-                            sync_manager
-                                .clone()
-                                .start_background_sync(state.db.clone(), state.audit.clone());
-                        }
-                        Err(e) => eprintln!("WebDAV nicht erreichbar, kein Abgleich: {:#}", e),
-                    }
+                    // Ohne Verbindungstest: ist der Server beim Start nicht erreichbar, bleibt
+                    // der Abgleich eingerichtet und wird alle 3 Minuten wiederholt.
+                    let sync_manager = Arc::new(webdav_sync::WebDavSyncManager::new(
+                        state.sync_run_lock.clone(),
+                    ));
+                    sync_manager.set_credentials(url, username, password);
+                    install_sync_manager(&state, Some(sync_manager.clone())).await;
+                    println!("WebDAV-Abgleich aus gespeicherten Zugangsdaten eingerichtet");
+                    sync_manager
+                        .sync_logged(&state.db, Some(&state.audit), "Start")
+                        .await;
+                    sync_manager
+                        .clone()
+                        .start_background_sync(state.db.clone(), state.audit.clone());
                 }
             });
 

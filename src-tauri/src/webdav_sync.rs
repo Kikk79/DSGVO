@@ -279,29 +279,25 @@ impl WebDavClient {
 }
 
 /// Hält die WebDAV-Verbindung und löst Abgleiche aus (Start, alle 3 Minuten, Beenden,
-/// manuell). Jeder Abgleich läuft über `sync_engine::run_sync`; Abgleiche laufen nie parallel.
+/// manuell). Jeder Abgleich läuft über `sync_engine::run_sync`.
 ///
+/// `run_lock` gehört der App (`AppState::sync_run_lock`) und wird von allen Managern geteilt:
+/// auch ein alter Manager nach Neukonfiguration läuft nie parallel zu einem neuen.
 /// Sperr-Reihenfolge: `run_lock` → Datenbank. Die Datenbank wird in `run_sync` nur kurz für
 /// reine DB-Schritte gesperrt; niemand hält die Datenbank und wartet auf `run_lock`.
 pub struct WebDavSyncManager {
     client: std::sync::Mutex<Option<Arc<WebDavClient>>>,
-    run_lock: Mutex<()>,
+    run_lock: Arc<Mutex<()>>,
     stopped: AtomicBool,
     last_sync: std::sync::Mutex<Option<DateTime<Utc>>>,
     last_outcome: std::sync::Mutex<Option<String>>,
 }
 
-impl Default for WebDavSyncManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl WebDavSyncManager {
-    pub fn new() -> Self {
+    pub fn new(run_lock: Arc<Mutex<()>>) -> Self {
         Self {
             client: std::sync::Mutex::new(None),
-            run_lock: Mutex::new(()),
+            run_lock,
             stopped: AtomicBool::new(false),
             last_sync: std::sync::Mutex::new(None),
             last_outcome: std::sync::Mutex::new(None),
@@ -324,6 +320,13 @@ impl WebDavSyncManager {
 
         *self.client.lock().unwrap() = Some(Arc::new(client));
         Ok(())
+    }
+
+    /// Übernimmt gespeicherte Zugangsdaten ohne Verbindungstest (Programmstart): ist der
+    /// Server gerade nicht erreichbar, schlagen die Abgleiche fehl und werden wiederholt.
+    pub fn set_credentials(&self, base_url: String, username: String, password: String) {
+        *self.client.lock().unwrap() =
+            Some(Arc::new(WebDavClient::new(base_url, username, password)));
     }
 
     /// Check if WebDAV is configured
