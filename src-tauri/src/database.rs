@@ -780,7 +780,7 @@ impl Database {
             params.push(cat);
         }
 
-        sql.push_str(" ORDER BY created_at DESC");
+        sql.push_str(" ORDER BY strftime('%Y-%m-%d %H:%M:%f', created_at) DESC");
 
         let mut query_builder = sqlx::query_as::<_, Observation>(&sql);
 
@@ -801,10 +801,10 @@ impl Database {
         since: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Observation>> {
         let observations = sqlx::query_as::<_, Observation>(
-            "SELECT * FROM observations WHERE deleted_at IS NULL AND (created_at >= ? OR updated_at >= ?) ORDER BY created_at DESC",
+            "SELECT * FROM observations WHERE deleted_at IS NULL AND (strftime('%Y-%m-%d %H:%M:%f', created_at) >= strftime('%Y-%m-%d %H:%M:%f', ?) OR strftime('%Y-%m-%d %H:%M:%f', updated_at) >= strftime('%Y-%m-%d %H:%M:%f', ?)) ORDER BY strftime('%Y-%m-%d %H:%M:%f', created_at) DESC",
         )
-        .bind(since)
-        .bind(since)
+        .bind(format_ts(since))
+        .bind(format_ts(since))
         .fetch_all(&self.pool)
         .await
         .context("Failed to fetch observations since timestamp")?;
@@ -838,7 +838,7 @@ impl Database {
             LEFT JOIN students s ON o.student_id = s.id
             LEFT JOIN classes c ON s.class_id = c.id
             LEFT JOIN categories cat ON o.category = cat.name AND cat.deleted_at IS NULL
-            WHERE o.created_at BETWEEN ? AND ?
+            WHERE strftime('%Y-%m-%d %H:%M:%f', o.created_at) BETWEEN strftime('%Y-%m-%d %H:%M:%f', ?) AND strftime('%Y-%m-%d %H:%M:%f', ?)
               AND s.status = 'active'
               AND o.deleted_at IS NULL AND s.deleted_at IS NULL AND c.deleted_at IS NULL
         "#
@@ -853,12 +853,12 @@ impl Database {
             query.push_str(" AND o.category = ?");
         }
 
-        query.push_str(" ORDER BY o.created_at DESC");
+        query.push_str(" ORDER BY strftime('%Y-%m-%d %H:%M:%f', o.created_at) DESC");
 
         // Build the query with parameters
         let mut query_builder = sqlx::query_as::<_, CalendarObservation>(&query)
-            .bind(start_date)
-            .bind(end_date);
+            .bind(format_ts(start_date))
+            .bind(format_ts(end_date));
 
         if let Some(class_id) = class_id {
             query_builder = query_builder.bind(class_id);
@@ -1519,7 +1519,7 @@ impl Database {
             if let Ok(category) = serde_json::from_value::<Category>(category_value.clone()) {
                 // Check if category with same name exists
                 let existing_id: Option<i64> =
-                    sqlx::query_scalar("SELECT id FROM categories WHERE name = ?")
+                    sqlx::query_scalar("SELECT id FROM categories WHERE name = ? AND deleted_at IS NULL")
                         .bind(&category.name)
                         .fetch_optional(&self.pool)
                         .await?;
@@ -1589,7 +1589,7 @@ impl Database {
                 .map(|_| "?")
                 .collect::<Vec<_>>()
                 .join(", ");
-            let query = format!("UPDATE categories SET is_active = 0, updated_at = ?, modified_by_device = ? WHERE name NOT IN ({})", placeholders);
+            let query = format!("UPDATE categories SET is_active = 0, updated_at = ?, modified_by_device = ? WHERE deleted_at IS NULL AND is_active = 1 AND name NOT IN ({})", placeholders);
 
             let mut query_builder = sqlx::query(&query)
                 .bind(self.now_ts())
@@ -1732,20 +1732,20 @@ impl Database {
         let count: i64 = sqlx::query_scalar(
             r#"
             SELECT COUNT(*) FROM (
-                SELECT 1 FROM students WHERE updated_at > ? LIMIT 1
+                SELECT 1 FROM (SELECT 1 FROM students WHERE strftime('%Y-%m-%d %H:%M:%f', updated_at) > strftime('%Y-%m-%d %H:%M:%f', ?) LIMIT 1)
                 UNION ALL
-                SELECT 1 FROM classes WHERE updated_at > ? LIMIT 1
+                SELECT 1 FROM (SELECT 1 FROM classes WHERE strftime('%Y-%m-%d %H:%M:%f', updated_at) > strftime('%Y-%m-%d %H:%M:%f', ?) LIMIT 1)
                 UNION ALL
-                SELECT 1 FROM observations WHERE updated_at > ? LIMIT 1
+                SELECT 1 FROM (SELECT 1 FROM observations WHERE strftime('%Y-%m-%d %H:%M:%f', updated_at) > strftime('%Y-%m-%d %H:%M:%f', ?) LIMIT 1)
                 UNION ALL
-                SELECT 1 FROM categories WHERE updated_at > ? LIMIT 1
+                SELECT 1 FROM (SELECT 1 FROM categories WHERE strftime('%Y-%m-%d %H:%M:%f', updated_at) > strftime('%Y-%m-%d %H:%M:%f', ?) LIMIT 1)
             )
             "#,
         )
-        .bind(since)
-        .bind(since)
-        .bind(since)
-        .bind(since)
+        .bind(format_ts(since))
+        .bind(format_ts(since))
+        .bind(format_ts(since))
+        .bind(format_ts(since))
         .fetch_one(&self.pool)
         .await?;
 
@@ -4237,6 +4237,72 @@ zweite Zeile', '[]', '2025-09-05 12:00:00', '2025-09-05T12:00:00Z', 'desktop-B')
             let after: Vec<(i64, String)> = sqlx::query_as("SELECT id, uuid FROM categories ORDER BY id")
                 .fetch_all(&db.pool).await.unwrap();
             assert_eq!(before, after);
+        }
+
+        #[tokio::test]
+        async fn test_category_import_ignores_tombstones_and_keeps_inactive_stamps() {
+            let (db, _dir) = create_test_db().await;
+            let tomb = "2026-01-01T00:00:00.000Z";
+            sqlx::query("UPDATE categories SET deleted_at = ? WHERE name = 'Sozial'")
+                .bind(tomb).execute(&db.pool).await.unwrap();
+            sqlx::query("UPDATE categories SET is_active = 0 WHERE name = 'Fachlich'")
+                .execute(&db.pool).await.unwrap();
+            let stamp = |n: &str| {
+                let n = n.to_string();
+                let pool = db.pool.clone();
+                async move {
+                    sqlx::query_as::<_, (String,)>("SELECT CAST(updated_at AS TEXT) FROM categories WHERE name = ? ORDER BY id")
+                        .bind(n).fetch_all(&pool).await.unwrap()
+                }
+            };
+            let tomb_before = stamp("Sozial").await;
+            let inactive_before = stamp("Fachlich").await;
+            let data = vec![serde_json::json!({"id": 1, "name": "Sozial", "color": "#1", "background_color": "#2",
+                "text_color": "#3", "is_active": true, "sort_order": 1,
+                "created_at": "2025-01-01T08:00:00.000Z", "updated_at": "2025-01-01T08:00:00.000Z",
+                "source_device_id": "x"})];
+            let n = db.import_categories_with_merge(&data).await.unwrap();
+            assert_eq!(n, 1);
+            let visible = db.get_categories().await.unwrap();
+            assert_eq!(visible.iter().filter(|c| c.name == "Sozial").count(), 1);
+            let tomb_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM categories WHERE name = 'Sozial' AND deleted_at = ?")
+                .bind(tomb).fetch_one(&db.pool).await.unwrap();
+            assert_eq!(tomb_rows, 1);
+            assert_eq!(stamp("Sozial").await[0], tomb_before[0]);
+            assert_eq!(stamp("Fachlich").await, inactive_before);
+        }
+
+        #[tokio::test]
+        async fn test_mixed_timestamp_formats_order_and_compare() {
+            let (db, _dir) = create_test_db().await;
+            let obs = create_test_observation(&db).await;
+            let obs2 = db
+                .create_observation(obs.student_id, 1, "Sozial".into(), "zwei".into(), vec![])
+                .await
+                .unwrap();
+            // Alt-Format 10:00 (spaeter) vs. neues Format 09:00 (frueher), gleicher Tag.
+            // Als Text sortiert 'T' nach ' ' -> falsche Reihenfolge ohne Normalisierung.
+            sqlx::query("UPDATE observations SET created_at = '2026-03-01 10:00:00', updated_at = '2026-03-01 10:00:00' WHERE id = ?")
+                .bind(obs.id).execute(&db.pool).await.unwrap();
+            sqlx::query("UPDATE observations SET created_at = '2026-03-01T09:00:00.000Z', updated_at = '2026-03-01T09:00:00.000Z' WHERE id = ?")
+                .bind(obs2.id).execute(&db.pool).await.unwrap();
+            let all = db.search_observations(None, None, None).await.unwrap();
+            assert_eq!(all[0].id, obs.id);
+            assert_eq!(all[1].id, obs2.id);
+            let cutoff = crate::sync_time::parse_ts("2026-03-01T09:30:00.000Z").unwrap();
+            let since = db.get_observations_since(cutoff).await.unwrap();
+            assert_eq!(since.len(), 1);
+            assert_eq!(since[0].id, obs.id);
+            assert!(db.has_changes_since(cutoff).await.unwrap());
+            // Alle Zeilen auf den 1. Maerz setzen; Grenze nach dem Alt-Format-Eintrag (10:00)
+            for t in ["classes", "students", "categories", "observations"] {
+                sqlx::query(&format!("UPDATE {} SET updated_at = '2026-03-01 10:00:00'", t))
+                    .execute(&db.pool).await.unwrap();
+            }
+            let after = crate::sync_time::parse_ts("2026-03-01T10:30:00.000Z").unwrap();
+            assert!(!db.has_changes_since(after).await.unwrap());
+            let before = crate::sync_time::parse_ts("2026-03-01T09:59:00.000Z").unwrap();
+            assert!(db.has_changes_since(before).await.unwrap());
         }
     }
 }
