@@ -112,13 +112,14 @@ function RestoreSection() {
     setImporting(true);
     setImportError(null);
     try {
-      await invoke<string>('import_full_backup_data', { backupData: backup.content });
+      const result = await invoke<string>('import_full_backup_data', { backupData: backup.content });
       const { loadStudents, loadClasses, loadCategories, getDeviceConfig } = useAppStore.getState();
       await Promise.allSettled([loadStudents(), loadClasses(), loadCategories(), getDeviceConfig()]);
       bumpDataVersion();
       setConfirming(false);
       setBackup(null);
-      toast.success('Sicherung eingespielt.');
+      // Backend meldet „Sicherung eingespielt: N neu, N aktualisiert, N gelöscht“
+      toast.success(typeof result === 'string' && result.trim() ? result : 'Sicherung eingespielt.');
     } catch (error) {
       console.error('Sicherung konnte nicht eingespielt werden:', error);
       setImportError(errorMessage(error, 'Die Sicherung konnte nicht eingespielt werden.'));

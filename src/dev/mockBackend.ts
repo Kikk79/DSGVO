@@ -768,24 +768,60 @@ function createHandlers(state: MockState) {
     },
 
     export_all_data: () => {
-      // Gleiche Form wie export_all_data in main.rs: immer der volle Stand
-      const observations = state.observations;
-      const categories = state.categories.filter((item) => item.is_active);
-      return JSON.stringify({
-        format: 'full_export',
-        version: '1.1',
-        timestamp: now(),
-        export_scope: {
-          days_back: null,
-          total_students: state.students.length,
-          total_classes: state.classes.length,
-          total_observations: observations.length,
-          total_categories: categories.length,
-        },
-        source_device: { ...state.device, device_id: DEVICE_ID },
-        data: { students: state.students, classes: state.classes, observations, categories },
-        device_config: { ...state.device },
+      // Gleiche Form wie export_all_data in main.rs: Gesamtstand `snapshot_v2` in der Hülle
+      // {"checksum", "data"}; Verweise laufen über UUIDs (hier aus den Mock-IDs abgeleitet).
+      const uuid = (kind: string, id: number) => `mock-${kind}-${id}`;
+      const meta = (row: { created_at: string; updated_at: string; source_device_id: string }) => ({
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        deleted_at: null,
+        modified_by_device: DEVICE_ID,
+        source_device_id: row.source_device_id,
       });
+      const data = {
+        format: 'snapshot_v2',
+        schema_version: 2,
+        device_id: DEVICE_ID,
+        device_role: state.deviceRole,
+        device_name: state.device.device_name,
+        generated_at: now(),
+        rows: {
+          categories: state.categories.map((row) => ({
+            uuid: uuid('category', row.id),
+            name: row.name,
+            color: row.color,
+            background_color: row.background_color,
+            text_color: row.text_color,
+            is_active: row.is_active,
+            sort_order: row.sort_order,
+            ...meta(row),
+          })),
+          classes: state.classes.map((row) => ({
+            uuid: uuid('class', row.id),
+            name: row.name,
+            school_year: row.school_year,
+            ...meta(row),
+          })),
+          students: state.students.map((row) => ({
+            uuid: uuid('student', row.id),
+            class_uuid: uuid('class', row.class_id),
+            first_name: row.first_name,
+            last_name: row.last_name,
+            status: row.status,
+            ...meta(row),
+          })),
+          observations: state.observations.map((row) => ({
+            uuid: uuid('observation', row.id),
+            student_uuid: uuid('student', row.student_id),
+            category: row.category,
+            text: row.text,
+            tags: row.tags,
+            ...meta(row),
+          })),
+        },
+      };
+      // Prüfsumme im echten Backend: SHA-256 über den data-Text; hier nur ein Platzhalter.
+      return JSON.stringify({ checksum: 'mock', data });
     },
 
     export_changeset: () => btoa(JSON.stringify({ format: 'changeset_v1', timestamp: now(), changes: [] })),
@@ -796,8 +832,7 @@ function createHandlers(state: MockState) {
       `Imported changeset from ${required<string>(args, 'filePath')}: 0 new, 0 updated`,
     import_full_backup: (args) => `Imported full backup from ${required<string>(args, 'filePath')}: 0 new, 0 updated`,
     import_changeset_data: () => 'Imported changeset data: Successfully imported 0 observations',
-    import_full_backup_data: () =>
-      'Imported full backup data: Successfully imported 0 classes, 0 students, 0 observations, 0 categories',
+    import_full_backup_data: () => 'Sicherung eingespielt: 0 neu, 0 aktualisiert, 0 gelöscht',
 
     // --- Gerät, Speicherort, Abgleich --------------------------------------
     get_sync_status: () => ({ peer_connected: false, last_sync: null, pending_changes: 0 }),

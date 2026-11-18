@@ -24,6 +24,33 @@ const backupFile = JSON.stringify({
   data: { students: [], classes: [], observations: [], categories: [] },
 });
 
+const meta = { created_at: '2026-11-01T10:00:00Z', updated_at: '2026-11-01T10:00:00Z', modified_by_device: 'a', source_device_id: 'a' };
+const snapshotBackupFile = JSON.stringify({
+  checksum: 'abc',
+  data: {
+    format: 'snapshot_v2',
+    schema_version: 2,
+    device_id: 'laptop-1',
+    device_role: 'laptop',
+    device_name: 'Laptop',
+    generated_at: '2026-11-17T08:00:00Z',
+    rows: {
+      categories: [{ uuid: 'k1', name: 'Sozialverhalten', deleted_at: null, ...meta }],
+      classes: [{ uuid: 'c1', name: '5a', deleted_at: null, ...meta }],
+      students: [
+        { uuid: 's1', class_uuid: 'c1', deleted_at: null, ...meta },
+        { uuid: 's2', class_uuid: 'c1', deleted_at: null, ...meta },
+        { uuid: 's3', class_uuid: 'c1', deleted_at: '2026-11-02T10:00:00Z', ...meta },
+      ],
+      observations: [
+        { uuid: 'o1', student_uuid: 's1', deleted_at: null, ...meta },
+        { uuid: 'o2', student_uuid: 's1', deleted_at: null, ...meta },
+        { uuid: 'o3', student_uuid: 's2', deleted_at: null, ...meta },
+      ],
+    },
+  },
+});
+
 const notConfigured = {
   configured: false,
   active: false,
@@ -54,7 +81,7 @@ function handlers(command: string): unknown {
     case 'get_device_config':
       return { device_type: 'notebook', device_name: 'Notebook' };
     case 'import_full_backup_data':
-      return 'Imported full backup data: Successfully imported 1 classes, 3 students, 5 observations, 2 categories';
+      return 'Sicherung eingespielt: 11 neu, 0 aktualisiert, 0 gelöscht';
     default:
       return null;
   }
@@ -165,6 +192,25 @@ describe('EinstellungenPage', () => {
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('import_full_backup_data', { backupData: backupFile }),
     );
+  });
+
+  it('erkennt eine Sicherung im aktuellen Format (snapshot_v2) und spielt sie ein', async () => {
+    renderAt('/einstellungen/daten');
+    const file = new File([snapshotBackupFile], 'sicherung-neu.json', { type: 'application/json' });
+    fireEvent.change(screen.getByTestId('backup-file'), { target: { files: [file] } });
+
+    expect(await screen.findByText('sicherung-neu.json')).toBeInTheDocument();
+    // gelöschte Einträge zählen nicht mit
+    expect(screen.getByText(/1 Klasse, 2 Schüler, 3 Beobachtungen, 1 Kategorie/)).toBeInTheDocument();
+    expect(screen.getByText('Laptop')).toBeInTheDocument();
+    expect(screen.queryByText(/keine Sicherung/)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sicherung einspielen' }));
+    await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Einspielen' }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('import_full_backup_data', { backupData: snapshotBackupFile }),
+    );
+    expect(await screen.findByText('Sicherung eingespielt: 11 neu, 0 aktualisiert, 0 gelöscht')).toBeInTheDocument();
   });
 
   it('weist Dateien zurück, die keine Sicherung sind', async () => {
