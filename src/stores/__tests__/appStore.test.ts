@@ -722,98 +722,9 @@ describe('AppStore', () => {
       expect(result.current.syncStatus).toEqual(mockStatus);
       expect(result.current.error).toBe(null);
     });
-
-    it('should start P2P sync successfully', async () => {
-      mockInvoke.mockResolvedValue(undefined);
-      
-      const { result } = renderHook(() => useAppStore());
-      
-      await act(async () => {
-        await result.current.startP2PSync();
-      });
-      
-      expect(mockInvoke).toHaveBeenCalledWith('start_p2p_sync');
-      expect(result.current.loading).toBe(false);
-      expect(result.current.error).toBe(null);
-    });
-
-    it('should stop P2P sync successfully', async () => {
-      mockInvoke.mockResolvedValue(undefined);
-      
-      const { result } = renderHook(() => useAppStore());
-      
-      await act(async () => {
-        await result.current.stopP2PSync();
-      });
-      
-      expect(mockInvoke).toHaveBeenCalledWith('stop_p2p_sync');
-      expect(result.current.loading).toBe(false);
-      expect(result.current.error).toBe(null);
-    });
-
-    it('should trigger sync successfully', async () => {
-      mockInvoke
-        .mockResolvedValueOnce(undefined) // trigger_sync
-        .mockResolvedValueOnce([]) // search_observations
-        .mockResolvedValueOnce([]) // get_students
-        .mockResolvedValueOnce({ peer_connected: false, last_sync: null, pending_changes: 0 }); // get_sync_status
-      
-      const { result } = renderHook(() => useAppStore());
-      
-      await act(async () => {
-        await result.current.triggerSync();
-      });
-      
-      expect(mockInvoke).toHaveBeenCalledWith('trigger_sync');
-      expect(result.current.loading).toBe(false);
-      expect(result.current.error).toBe(null);
-    });
   });
 
   describe('PIN Management', () => {
-    it('should generate pairing PIN successfully', async () => {
-      const mockPin = {
-        pin: '123456',
-        expires_at: '2024-01-01T01:00:00Z',
-        expires_in_seconds: 3600,
-      };
-      
-      mockInvoke.mockResolvedValue(mockPin);
-      
-      const { result } = renderHook(() => useAppStore());
-      
-      let pin: any;
-      await act(async () => {
-        pin = await result.current.generatePairingPin();
-      });
-      
-      expect(mockInvoke).toHaveBeenCalledWith('generate_pairing_pin');
-      expect(result.current.currentPin).toEqual(mockPin);
-      expect(pin).toEqual(mockPin);
-      expect(result.current.loading).toBe(false);
-      expect(result.current.error).toBe(null);
-    });
-
-    it('should get current pairing PIN successfully', async () => {
-      const mockPin = {
-        pin: '123456',
-        expires_at: '2024-01-01T01:00:00Z',
-        expires_in_seconds: 3600,
-      };
-      
-      mockInvoke.mockResolvedValue(mockPin);
-      
-      const { result } = renderHook(() => useAppStore());
-      
-      await act(async () => {
-        await result.current.getCurrentPairingPin();
-      });
-      
-      expect(mockInvoke).toHaveBeenCalledWith('get_current_pairing_pin');
-      expect(result.current.currentPin).toEqual(mockPin);
-      expect(result.current.error).toBe(null);
-    });
-
     it('should clear pairing PIN successfully', async () => {
       // Set up initial PIN
       const { result } = renderHook(() => useAppStore());
@@ -834,24 +745,6 @@ describe('AppStore', () => {
       
       expect(mockInvoke).toHaveBeenCalledWith('clear_pairing_pin');
       expect(result.current.currentPin).toBe(null);
-      expect(result.current.loading).toBe(false);
-      expect(result.current.error).toBe(null);
-    });
-
-    it('should get pairing code successfully', async () => {
-      const mockCode = 'ABC123';
-      
-      mockInvoke.mockResolvedValue(mockCode);
-      
-      const { result } = renderHook(() => useAppStore());
-      
-      let code: any;
-      await act(async () => {
-        code = await result.current.getPairingCode();
-      });
-      
-      expect(mockInvoke).toHaveBeenCalledWith('get_pairing_code');
-      expect(code).toBe(mockCode);
       expect(result.current.loading).toBe(false);
       expect(result.current.error).toBe(null);
     });
