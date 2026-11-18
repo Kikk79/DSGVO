@@ -840,7 +840,7 @@ function createHandlers(state: MockState) {
     get_device_config: () => ({ ...state.device }),
     set_device_config: (args) => {
       state.device = {
-        device_type: required<string>(args, 'deviceType'),
+        device_type: arg<string>(args, 'deviceType') ?? 'unknown',
         device_name: arg<string>(args, 'deviceName') ?? null,
       };
       return null;
@@ -866,9 +866,9 @@ function createHandlers(state: MockState) {
       last_outcome: state.lastOutcome,
     }),
     get_device_role: () => state.deviceRole,
-    // Wie role_suggestion in sync_engine.rs: nur bei ausdrücklich gesetztem Gerätetyp
+    // Wie role_suggestion in sync_engine.rs: nur „notebook“ → Laptop, Desktop wird nie vorgeschlagen
     get_device_role_suggestion: () =>
-      state.device.device_type === 'notebook' ? 'laptop' : state.device.device_type === 'computer' ? 'desktop' : null,
+      state.device.device_type === 'notebook' ? 'laptop' : null,
     set_device_role: (args) => {
       const role = required<string>(args, 'role');
       if (role !== 'laptop' && role !== 'desktop') throw `Invalid device role: ${role}`;

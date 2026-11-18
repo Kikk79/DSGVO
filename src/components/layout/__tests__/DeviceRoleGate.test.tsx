@@ -57,11 +57,11 @@ describe('DeviceRoleGate', () => {
   });
 
   it('belegt die Auswahl aus dem Vorschlag vor und verlangt trotzdem „Weiter“', async () => {
-    suggestion = 'desktop';
+    suggestion = 'laptop';
     renderGate();
-    const desktop = await screen.findByRole('radio', { name: /^Desktop/ });
-    await waitFor(() => expect(desktop).toBeChecked());
-    expect(screen.getByRole('radio', { name: /^Laptop/ })).not.toBeChecked();
+    const laptop = await screen.findByRole('radio', { name: /^Laptop/ });
+    await waitFor(() => expect(laptop).toBeChecked());
+    expect(screen.getByRole('radio', { name: /^Desktop/ })).not.toBeChecked();
     expect(screen.queryByText('Die App')).not.toBeInTheDocument();
   });
 

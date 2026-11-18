@@ -348,12 +348,17 @@ function DatabasePathSection() {
 
 type DeviceType = 'computer' | 'notebook';
 
+// Ein nie gesetzter Gerätetyp bleibt ungesetzt (null) und wird nicht stillschweigend „Computer“.
+function toDeviceType(value: string | null | undefined): DeviceType | null {
+  return value === 'notebook' || value === 'computer' ? value : null;
+}
+
 function DeviceSection() {
   const deviceConfig = useAppStore((state) => state.deviceConfig);
   const getDeviceConfig = useAppStore((state) => state.getDeviceConfig);
   const toast = useToast();
   const [name, setName] = useState('');
-  const [type, setType] = useState<DeviceType>('computer');
+  const [type, setType] = useState<DeviceType | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -364,20 +369,20 @@ function DeviceSection() {
   useEffect(() => {
     if (!deviceConfig) return;
     setName(deviceConfig.device_name ?? '');
-    setType(deviceConfig.device_type === 'notebook' ? 'notebook' : 'computer');
+    setType(toDeviceType(deviceConfig.device_type));
   }, [deviceConfig]);
 
   const dirty =
     deviceConfig !== null &&
     (name.trim() !== (deviceConfig.device_name ?? '') ||
-      type !== (deviceConfig.device_type === 'notebook' ? 'notebook' : 'computer'));
+      type !== toDeviceType(deviceConfig.device_type));
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setSaving(true);
     setError(null);
     try {
-      await invoke('set_device_config', { deviceType: type, deviceName: name.trim() || null });
+      await invoke('set_device_config', { deviceType: type ?? null, deviceName: name.trim() || null });
       await getDeviceConfig();
       toast.success('Geräteangaben gespeichert.');
     } catch (saveError) {
@@ -409,7 +414,7 @@ function DeviceSection() {
             </span>
             <SegmentedControl<DeviceType>
               ariaLabel="Gerätetyp"
-              value={type}
+              value={type as DeviceType}
               onChange={setType}
               options={[
                 { value: 'computer', label: 'Computer' },

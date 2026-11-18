@@ -69,14 +69,13 @@ impl Serialize for SyncOutcome {
     }
 }
 
-/// Vorbelegung der Rollenauswahl aus dem Gerätetyp: nur bei ausdrücklich gesetztem Typ
-/// (`notebook` → Laptop, `computer` → Desktop). Sonst kein Vorschlag – eine falsche
-/// Vorbelegung „Desktop“ auf dem Gerät mit den echten Daten würde diese beim ersten Abgleich
-/// ersetzen.
+/// Vorbelegung der Rollenauswahl aus dem Gerätetyp: nur `notebook` → Laptop. „Desktop“ wird nie
+/// vorgeschlagen: ältere Versionen schreiben `computer` auch auf Laptops als Vorgabe, und eine
+/// falsche Vorbelegung „Desktop“ auf dem Gerät mit den echten Daten würde diese beim ersten
+/// Abgleich ersetzen.
 pub fn role_suggestion(device_type: Option<&str>) -> Option<&'static str> {
     match device_type {
         Some("notebook") => Some(ROLE_LAPTOP),
-        Some("computer") => Some(ROLE_DESKTOP),
         _ => None,
     }
 }
@@ -1575,7 +1574,7 @@ mod tests {
     #[test]
     fn test_role_suggestion() {
         assert_eq!(role_suggestion(Some("notebook")), Some("laptop"));
-        assert_eq!(role_suggestion(Some("computer")), Some("desktop"));
+        assert_eq!(role_suggestion(Some("computer")), None);
         assert_eq!(role_suggestion(None), None);
         assert_eq!(role_suggestion(Some("unknown")), None);
         assert_eq!(role_suggestion(Some("")), None);

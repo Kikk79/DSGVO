@@ -542,23 +542,18 @@ async fn get_device_config(state: tauri::State<'_, AppState>) -> Result<DeviceCo
 #[tauri::command]
 async fn set_device_config(
     state: tauri::State<'_, AppState>,
-    device_type: String,
+    device_type: Option<String>,
     device_name: Option<String>,
 ) -> Result<(), String> {
-    let _config = DeviceConfig {
-        device_type: device_type.clone(),
-        device_name: device_name.clone(),
-    };
-
     state
         .crypto
-        .set_device_config(Some(device_type.clone()), device_name)
+        .set_device_config(device_type.clone(), device_name)
         .map_err(|e| e.to_string())?;
 
     // Log the configuration change
     state
         .audit
-        .log_action("update", "device_config", 0, 1, Some(&device_type))
+        .log_action("update", "device_config", 0, 1, device_type.as_deref())
         .await
         .map_err(|e| e.to_string())?;
 
