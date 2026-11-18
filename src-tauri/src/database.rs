@@ -1512,7 +1512,8 @@ impl Database {
     }
 
     /// Zeilen, die `all_rows_for_snapshot` mangels Elternteil auslässt:
-    /// (Schüler ohne Klasse, Beobachtungen ohne Schüler).
+    /// (Schüler ohne Klasse, Beobachtungen ohne exportierten Schüler – also auch Beobachtungen
+    /// von Schülern ohne Klasse).
     pub async fn snapshot_orphan_counts(&self) -> Result<(i64, i64)> {
         let students: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM students WHERE class_id NOT IN (SELECT id FROM classes)",
@@ -1520,7 +1521,8 @@ impl Database {
         .fetch_one(&self.pool)
         .await?;
         let observations: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM observations WHERE student_id NOT IN (SELECT id FROM students)",
+            "SELECT COUNT(*) FROM observations WHERE student_id NOT IN \
+             (SELECT s.id FROM students s JOIN classes c ON c.id = s.class_id)",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -1712,8 +1714,14 @@ impl Database {
 
         let class_uuids: HashMap<i64, String> =
             classes.iter().map(|c| (c.id, c.uuid.clone())).collect();
-        let student_uuids: HashMap<i64, String> =
-            students.iter().map(|s| (s.id, s.uuid.clone())).collect();
+        // Nur Schüler, die auch in der Datei stehen (mit vorhandener Klasse). Beobachtungen
+        // anderer Schüler würden beim Empfänger ins Leere zeigen und den ganzen Abgleich
+        // scheitern lassen; sie werden ausgelassen und in `snapshot_orphan_counts` gezählt.
+        let student_uuids: HashMap<i64, String> = students
+            .iter()
+            .filter(|s| class_uuids.contains_key(&s.class_id))
+            .map(|s| (s.id, s.uuid.clone()))
+            .collect();
 
         Ok(SnapshotRows {
             categories: categories
@@ -1823,6 +1831,67 @@ pub(crate) mod tests {
         let crypto = Arc::new(CryptoManager::new().unwrap());
         let db = Database::new(&db_path, crypto).await.unwrap();
         (db, temp_dir)
+    }
+
+    /// Schüler ohne Klasse fehlen in der Datei; ihre Beobachtungen dürfen dann nicht auf sie
+    /// verweisen, sonst scheitert der Abgleich beim Empfänger komplett.
+    #[tokio::test]
+    async fn test_snapshot_skips_observations_of_classless_students() {
+        let (db, _dir) = create_test_db().await;
+        let keep = db.create_class("5a".into(), "2025/26".into()).await.unwrap();
+        let gone = db.create_class("6b".into(), "2025/26".into()).await.unwrap();
+        let ok = db
+            .create_student(keep.id, "Anna".into(), "Klasse".into(), None)
+            .await
+            .unwrap();
+        let lost = db
+            .create_student(gone.id, "Ben".into(), "Ohneklasse".into(), None)
+            .await
+            .unwrap();
+        db.create_observation(ok.id, 1, "Sozialverhalten".into(), "bleibt".into(), vec![])
+            .await
+            .unwrap();
+        db.create_observation(lost.id, 1, "Sozialverhalten".into(), "Waise 1".into(), vec![])
+            .await
+            .unwrap();
+        db.create_observation(lost.id, 1, "Sozialverhalten".into(), "Waise 2".into(), vec![])
+            .await
+            .unwrap();
+        // Klasse hart entfernen (wie in alten Datenbanken vorgekommen)
+        {
+            let mut conn = db.pool.acquire().await.unwrap();
+            sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await.unwrap();
+            sqlx::query("DELETE FROM classes WHERE id = ?")
+                .bind(gone.id)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await.unwrap();
+        }
+
+        assert_eq!(db.snapshot_orphan_counts().await.unwrap(), (1, 2));
+        let snap = crate::snapshot::build_snapshot(&db, Some("laptop".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(snap.rows.students.len(), 1);
+        assert_eq!(snap.rows.observations.len(), 1);
+        let exported: std::collections::HashSet<_> =
+            snap.rows.students.iter().map(|s| s.uuid.clone()).collect();
+        assert!(snap
+            .rows
+            .observations
+            .iter()
+            .all(|o| exported.contains(&o.student_uuid)));
+
+        // Auf einem leeren Gerät: dekodieren und zusammenführen ohne Fehler
+        let decoded = crate::snapshot::decode(&crate::snapshot::encode(&snap)).unwrap();
+        let (empty, _dir2) = create_test_db().await;
+        crate::merge::merge_snapshot(&empty, &decoded).await.unwrap();
+        let texts: Vec<String> = sqlx::query_scalar("SELECT text FROM observations")
+            .fetch_all(&empty.pool)
+            .await
+            .unwrap();
+        assert_eq!(texts, vec!["bleibt".to_string()]);
     }
 
     #[tokio::test]
