@@ -2,7 +2,7 @@
 
 Lebendes Dokument. Jede Änderung am Sync (Backend `src-tauri/src/database.rs`, `webdav_sync.rs`,
 `main.rs`, Frontend `src/pages/einstellungen/SynchronisationTab.tsx`) wird hier nachgetragen:
-Anforderung, Entscheidung, Status. Stand: 2026-11-17.
+Anforderung, Entscheidung, Status. Stand: 2026-11-18.
 
 Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 
@@ -49,10 +49,35 @@ Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 
 ## 4. Offene Fragen
 
-- Keine (Stand 2026-11-17). Abgleich-Umfang: nur fachliche Daten, Audit-Log und Gerätekonfiguration nicht.
+- Keine (Stand 2026-11-18). Abgleich-Umfang: nur fachliche Daten, Audit-Log und Gerätekonfiguration nicht.
+- Außerhalb von Sync v2, weiterhin `offen`: A8, A9, A12, A13.
+
+### Akzeptierte Restrisiken (Stand 2026-11-18)
+
+- **Alte Änderungsdateien:** Beim Import einer alten Änderungsdatei (`changeset_file_v1`) werden Schüler-IDs lokal aufgelöst (die Datei enthält nur Beobachtungen). Stimmen die lokalen IDs nicht mit denen des Absenders überein, kann eine Beobachtung dem falschen Schüler zugeordnet oder übersprungen werden.
+- **Sehr alte Sicherungen** ohne `source_device_id` können beim Import Klassen und Schüler doppelt anlegen, weil die abgeleitete UUID dann nicht mit der vorhandenen übereinstimmt. Doppelte lassen sich in der Oberfläche löschen.
+- **Verwaiste Zeilen** (z.B. Beobachtung ohne Schüler, Schüler ohne Klasse in der Altdatenbank) werden nicht übertragen.
 
 ## 5. Bekannter Ist-Zustand (vor Umbau)
 
 - Übertragen wurden nur Beobachtungen der letzten 30 Tage (Changeset-Dateien über WebDAV oder per Datei). Abgelöst durch den Abgleich über Gesamtstände (siehe Entscheidungen).
 - Abgleich beim Start, alle 3 Minuten und beim Beenden; manuell über Einstellungen → Synchronisation.
 - 13 vorbestehende Sync-/Changeset-/Backup-Tests in `database.rs` schlugen fehl (vor 2026-11-17 schon rot); seit Task 7 sind sie entfernt oder auf das neue Format umgeschrieben und grün.
+
+### Probelauf der Umstellung (2026-11-18)
+
+Keine Kopie der echten Laptop-Datenbank verfügbar; stattdessen realistische Altdatenbank über das Legacy-Schema (Test `sync_engine::tests::test_rehearsal_migration_300_observations`, `cargo test --bin schuelerbeobachtung test_rehearsal -- --ignored --nocapture`): 3 Klassen, 30 Schüler (1 `deleted`), 8 Kategorien mit eigenen Farben (1 inaktiv), 320 Beobachtungen, gemischte Zeitstempelformate (`CURRENT_TIMESTAMP`, RFC 3339 mit `Z`/Offset/Millisekunden), Apostrophe, Umlaute, Zeilenumbrüche.
+
+| Prüfung | Ergebnis |
+|---|---|
+| Zeilenzahlen vorher/nachher (classes/students/categories/observations) | 3 / 30 / 8 / 320, unverändert |
+| SHA-256 über alle fachlichen Altspalten je Tabelle (Speichertyp inkl.) | identisch vor/nach Umstellung |
+| UUID | in jeder Zeile gesetzt und eindeutig; Schüler mit Status `deleted`: 1 (erhalten) |
+| Sicherungskopie `.vor-sync-v2-*.bak` | 1 Datei (114 688 Bytes), öffnet, Prüfsummen = Vorzustand |
+| Dauer der Umstellung | 47 ms |
+| Laptop → Desktop (Fake-WebDAV) | Gesamtstand 130 741 Bytes; Desktop gleich Laptop (30 Schüler, 320 Beobachtungen), Sicherungskopie `.vor-erstabgleich-*.bak` vorhanden; zweiter Lauf auf beiden Seiten: 0 Änderungen |
+
+### Echter WebDAV-Server (2026-11-18)
+
+Test `sync_engine::tests::test_real_webdav_roundtrip` (`#[ignore]`, URL aus `SYNC_E2E_WEBDAV_URL`) fährt Laptop/Desktop-Ablauf (Desktop wartet, Ersetzen, Bearbeiten, Löschweitergabe) gegen einen echten Server. Gleicher Ablauf läuft ohne Server gegen den Fake (`test_roundtrip_scenario_against_fake_dav`, grün). **Gegen einen echten Server nicht ausgeführt:** in der Build-Umgebung ließ sich wsgidav nicht installieren (kein pip/ensurepip, Nachladen von pip verweigert). Vor Auslieferung einmal gegen den echten Server (z.B. Nextcloud oder `wsgidav --host 127.0.0.1 --port 8765 --root <dir> --auth anonymous`) ausführen.
+

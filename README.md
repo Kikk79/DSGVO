@@ -100,6 +100,16 @@ schuelerbeobachtung
 - **Status Management**: Clear indication of active/inactive students
 - **GDPR Operations**: Direct access to export and deletion functions
 
+## 🔄 Synchronisation einrichten
+
+Der Abgleich läuft über einen WebDAV-Server (Einstellungen → Synchronisation). Ein Gerät ist **Laptop** (maßgeblich, hier liegen die echten Daten) oder **Desktop**. Die Rolle wird beim ersten Start gewählt.
+
+1. **Laptop zuerst einrichten:** Rolle „Laptop“, WebDAV-Zugang eintragen, einmal abgleichen. Damit liegt der Gesamtstand auf dem Server.
+2. **Dann den Desktop:** Rolle „Desktop“, denselben Server eintragen. Der Desktop wartet, bis ein Laptop-Stand vorhanden ist, und lädt bis dahin nichts hoch. Beim **ersten** Abgleich werden seine vorhandenen Daten einmalig durch den Laptop-Stand ersetzt; danach wird nur noch zusammengeführt.
+3. **Was wird abgeglichen:** Klassen, Schüler, Kategorien und Beobachtungen, **einschließlich Löschungen** (endgültiges Löschen gewinnt immer). Bei gleichzeitiger Bearbeitung gewinnt die jüngere Fassung. Audit-Log und Geräteeinstellungen werden nicht abgeglichen.
+4. **Serverzeit:** Maßgeblich ist die Uhrzeit des WebDAV-Servers (HTTP-`Date`), nicht die Rechneruhr. Falsch gehende Uhren stören den Abgleich daher nicht.
+5. **Sicherungskopien** (neben der Datenbankdatei `observations.db` im Datenverzeichnis der Anwendung): `observations.db.vor-sync-v2-<Zeit>.bak` entsteht bei der einmaligen Umstellung der Datenbank auf das neue Format; `observations.db.vor-erstabgleich-<Zeit>.bak` entsteht auf dem Desktop vor dem ersten Ersetzen (entfällt bei leerer Datenbank). Zum Zurückgehen die App schließen und die `.bak`-Datei unter dem Namen `observations.db` zurückkopieren.
+
 ## 🔄 Unified Data Synchronization
 
 The system features a **unified synchronization interface** accessible from the main navigation (`/sync`), consolidating all export/import operations for seamless data sharing between devices (e.g., between school notebook and home desktop):

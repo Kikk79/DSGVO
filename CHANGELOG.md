@@ -5,6 +5,25 @@ All notable changes to the Schülerbeobachtung GDPR-compliant student observatio
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-11-17
+
+### Changed
+
+- **Synchronisation neu aufgebaut (Sync v2):** Jedes Gerät legt einen Gesamtstand (`snapshot_<device_id>.json`) auf dem WebDAV-Server ab; Zusammenführen pro Datensatz über UUID in einer Transaktion. Es werden alle Daten übertragen (Klassen, Schüler, Kategorien, Beobachtungen), nicht mehr nur die letzten 30 Tage.
+- Löschungen werden synchronisiert (Löschen gewinnt immer, Kaskade auf abhängige Datensätze).
+- Gemeinsame Zeitbasis: Uhrzeit des WebDAV-Servers statt lokaler Rechneruhr; jüngere Fassung gewinnt.
+- Geräterolle Laptop/Desktop als Pflichtauswahl. Der Laptop ist maßgeblich; der Desktop wartet auf den Laptop-Stand und wird beim ersten Abgleich einmalig ersetzt.
+- Sicherung/Export und Import verwenden das Gesamtstand-Format; alte Sicherungs- und Änderungsdateien bleiben importierbar.
+
+### Added
+
+- Automatische Sicherungskopien `*.vor-sync-v2-*.bak` (Datenbankumstellung) und `*.vor-erstabgleich-*.bak` (erster Abgleich des Desktops).
+- Zeitpunkt des letzten Abgleichs wird dauerhaft gespeichert; übernommene Fremdänderungen stehen im Audit-Log.
+
+### Removed
+
+- Alter Änderungsdatei-Abgleich (`changeset_*.dat`); eigene alte Dateien werden beim Abgleich vom Server gelöscht.
+
 ## [0.4.0] - 2025-08-26
 
 ### Added
