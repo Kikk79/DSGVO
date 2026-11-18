@@ -6,7 +6,7 @@ import { format } from 'date-fns';
 import { useAppStore } from '../../../stores/appStore';
 import { ToastProvider } from '../../ui/Toast';
 import { ObservationEditor } from '../ObservationEditor';
-import type { ObservationView } from '../../../lib/observations';
+import { isEdited, type ObservationView } from '../../../lib/observations';
 
 const PATTERN = "yyyy-MM-dd'T'HH:mm";
 const createObservation = vi.fn();
@@ -83,6 +83,23 @@ describe('ObservationEditor: Datum und Uhrzeit', () => {
       student_id: 1,
       created_at: new Date(2026, 10, 10, 8, 30).toISOString(),
     });
+  });
+
+  it('sendet beim Anlegen keinen Zeitpunkt, solange das Feld nicht geändert wurde', async () => {
+    const user = userEvent.setup();
+    renderEditor();
+    await user.click(screen.getByRole('radio', { name: 'Sozialverhalten' }));
+    await user.type(screen.getByLabelText('Beobachtung'), 'Hat eine Streitsituation ruhig gelöst.');
+    await user.click(screen.getByRole('button', { name: 'Beobachtung speichern' }));
+
+    await waitFor(() => expect(createObservation).toHaveBeenCalledTimes(1));
+    expect(createObservation.mock.calls[0][0]).not.toHaveProperty('created_at');
+  });
+
+  it('markiert eine zurückdatierte neue Beobachtung nicht als bearbeitet', () => {
+    const at = '2026-11-10T08:30:00.000Z';
+    expect(isEdited({ createdAt: at, updatedAt: at })).toBe(false);
+    expect(isEdited({ createdAt: at, updatedAt: '2026-11-18T08:30:00.000Z' })).toBe(true);
   });
 
   it('zeigt beim Bearbeiten den vorhandenen Zeitpunkt in Ortszeit', () => {

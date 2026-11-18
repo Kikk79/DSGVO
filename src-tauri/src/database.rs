@@ -793,7 +793,7 @@ impl Database {
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&device_id)
         .bind(&created)
-        .bind(&now)
+        .bind(&created)
         .fetch_one(&self.pool)
         .await
         .context("Failed to create observation")?;
@@ -2821,7 +2821,8 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(format_ts(created.created_at), "2026-11-10T08:30:00.000Z");
-        assert_ne!(created.updated_at, created.created_at);
+        // Neue Zeile: nicht als bearbeitet markieren
+        assert_eq!(created.updated_at, created.created_at);
 
         // Ohne Angabe: jetzt, beide Zeitstempel gleich
         assert_eq!(original.created_at, original.updated_at);

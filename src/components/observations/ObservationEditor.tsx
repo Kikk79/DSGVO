@@ -208,7 +208,7 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
           category,
           text: trimmedText,
           tags,
-          created_at: new Date(createdAt).toISOString(),
+          ...(createdAtChanged ? { created_at: new Date(createdAt).toISOString() } : {}),
         });
         toast.success('Beobachtung gespeichert.');
       }

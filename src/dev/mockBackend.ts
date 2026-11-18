@@ -606,8 +606,7 @@ function createHandlers(state: MockState) {
 
     // --- Beobachtungen ----------------------------------------------------
     create_observation: (args) => {
-      const updated = now();
-      const created = checkedCreatedAt(arg<string | null>(args, 'createdAt')) ?? updated;
+      const created = checkedCreatedAt(arg<string | null>(args, 'createdAt')) ?? now();
       const row: ObservationRow = {
         id: id(),
         student_id: required<number>(args, 'studentId'),
@@ -616,7 +615,7 @@ function createHandlers(state: MockState) {
         text: required<string>(args, 'text'),
         tags: JSON.stringify(arg<string[]>(args, 'tags') ?? []),
         created_at: created,
-        updated_at: updated,
+        updated_at: created,
         source_device_id: DEVICE_ID,
       };
       state.observations.push(row);
