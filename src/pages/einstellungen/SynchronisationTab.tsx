@@ -15,13 +15,14 @@ import { SegmentedControl } from '../../components/ui/SegmentedControl';
 import { useToast } from '../../components/ui/toastContext';
 import { FactList, InlineError, Notice, Section } from './parts';
 import { readFileText } from './backup';
+import { importMessage } from './importResult';
+import { WAITING_DATA_LOSS_WARNING, WAITING_TEXT } from '../../lib/syncTexts';
 
 /** Zeitpunkt des letzten manuellen Abgleichs in dieser Sitzung (das Backend speichert ihn nicht immer). */
 let lastManualSyncAt: string | null = null;
 
 const ROLE_LABEL: Record<DeviceRole, string> = { laptop: 'Laptop', desktop: 'Desktop' };
 
-const WAITING_TEXT = 'Warte auf den Stand vom Laptop';
 const NO_LAPTOP_TEXT = 'Kein Laptop gefunden. Bitte auf dem Laptop einmal synchronisieren.';
 
 /** „Rechneruhr weicht 3 Sekunden von der Serverzeit ab“ – leer, wenn die Abweichung unter einer Sekunde liegt. */
@@ -59,12 +60,6 @@ function outcomeMessage(result: ManualSyncResult): { tone: 'success' | 'info' | 
 }
 
 type TestState = { kind: 'idle' } | { kind: 'testing' } | { kind: 'ok' } | { kind: 'failed'; message: string };
-
-/** Ergebnistext des Backends („… Successfully imported 3 observations“) auf Deutsch. */
-function importedCount(result: string): number | null {
-  const match = /imported (\d+) observations?/i.exec(result);
-  return match ? Number(match[1]) : null;
-}
 
 /** Reiter „Synchronisation“: WebDAV einrichten, testen, anhalten, manuell abgleichen; Austausch per Datei. */
 export function SynchronisationTab() {
@@ -246,11 +241,12 @@ export function SynchronisationTab() {
         )}
 
         {waiting && (
-          <Notice title={WAITING_TEXT}>
+          <Notice tone="warning" title={WAITING_TEXT}>
             <p>
               Dieses Gerät ist als Desktop eingestellt und übernimmt beim ersten Abgleich den Stand vom Laptop. Bitte
               synchronisieren Sie einmal auf dem Laptop; danach klappt es hier.
             </p>
+            <p className="font-semibold">{WAITING_DATA_LOSS_WARNING}</p>
           </Notice>
         )}
         {noLaptop && (
@@ -434,15 +430,8 @@ function FileExchange() {
         return;
       }
       const result = await invoke<string>('import_changeset_data', { changesetData: content });
-      const count = importedCount(result);
       bumpDataVersion();
-      toast.success(
-        count === null
-          ? 'Änderungsdatei eingelesen.'
-          : count === 0
-            ? 'Änderungsdatei eingelesen. Es gab nichts Neues.'
-            : `Änderungsdatei eingelesen: ${count} ${count === 1 ? 'Beobachtung' : 'Beobachtungen'} neu oder aktualisiert.`,
-      );
+      toast.success(importMessage(result));
     } catch (importError) {
       console.error('Änderungsdatei konnte nicht eingelesen werden:', importError);
       setError(
@@ -495,6 +484,8 @@ function FileExchange() {
 function RoleSection() {
   const role = useAppStore((state) => state.deviceRole);
   const setDeviceRole = useAppStore((state) => state.setDeviceRole);
+  // Unbekannt (Status noch nicht geladen) gilt vorsichtshalber als „noch nicht abgeglichen“.
+  const firstSyncDone = useAppStore((state) => state.webdavSync.firstSyncDone === true);
   const toast = useToast();
   const [editing, setEditing] = useState(false);
   const [choice, setChoice] = useState<DeviceRole>('laptop');
@@ -529,7 +520,8 @@ function RoleSection() {
       description={
         <p>
           Der Laptop ist maßgeblich: Dort sammeln Sie Beobachtungen. Ein Desktop übernimmt beim allerersten Abgleich den
-          Stand vom Laptop. Danach hat die Rolle keine Wirkung mehr auf den Abgleich.
+          Stand vom Laptop und ersetzt dabei alles, was auf ihm gespeichert ist. Stellen Sie deshalb nie das Gerät mit
+          Ihren echten Daten als Desktop ein. Nach dem ersten Abgleich hat die Rolle keine Wirkung mehr auf den Abgleich.
         </p>
       }
     >
@@ -549,14 +541,25 @@ function RoleSection() {
               { value: 'desktop', label: 'Desktop' },
             ]}
           />
-          {choice === 'desktop' && role !== 'desktop' && (
-            <Notice tone="warning">
-              <p>
-                Ein Desktop übernimmt beim ersten Abgleich den Stand vom Laptop und ersetzt dabei die Daten auf diesem
-                Gerät.
-              </p>
-            </Notice>
-          )}
+          {choice === 'desktop' && role !== 'desktop' &&
+            (firstSyncDone ? (
+              <Notice>
+                <p>
+                  Dieses Gerät hat den ersten Abgleich schon hinter sich. Mit der Rolle Desktop wird hier nichts ersetzt;
+                  beide Geräte werden weiter normal zusammengeführt.
+                </p>
+              </Notice>
+            ) : (
+              <Notice tone="warning" title="Daten auf diesem Gerät werden ersetzt">
+                <p>
+                  Ein Desktop übernimmt beim ersten Abgleich den Stand vom Laptop. Dabei wird alles, was auf diesem
+                  Gerät gespeichert ist, durch den Stand vom Laptop ersetzt.
+                </p>
+                <p className="font-semibold">
+                  Liegen Ihre echten Beobachtungen auf diesem Gerät, wählen Sie nicht „Desktop“, sondern „Laptop“.
+                </p>
+              </Notice>
+            ))}
           {error && <InlineError>{error}</InlineError>}
           <div className="flex flex-wrap items-center gap-3">
             <Button onClick={() => void handleSave()} loading={saving} disabled={choice === role}>

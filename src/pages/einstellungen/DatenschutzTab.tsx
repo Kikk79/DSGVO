@@ -1,12 +1,147 @@
-import { useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { invoke } from '@tauri-apps/api/core';
+import { Trash2 } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
+import { errorMessage } from '../../lib/errors';
+import { formatDateTime } from '../../lib/format';
+import { Button } from '../../components/ui/Button';
+import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Spinner } from '../../components/ui/Spinner';
-import { FactList, Notice, PathText, Section } from './parts';
+import { useToast } from '../../components/ui/toastContext';
+import { FactList, InlineError, Notice, PathText, Section } from './parts';
+
+/** Automatisch angelegte Sicherungskopie (Backend: list_safety_backups). */
+interface SafetyBackup {
+  path: string;
+  size: number;
+  created: string | null;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1).replace('.', ',')} MB`;
+}
+
+/**
+ * Sicherungskopien der Datenbank, die die App vor der Umstellung auf Sync v2 und vor dem
+ * Ersetzen beim ersten Abgleich anlegt. Sie enthalten alle Daten unverschlüsselt und werden
+ * nie automatisch gelöscht; hier lassen sie sich nach Rückfrage entfernen.
+ */
+function SafetyBackupsSection() {
+  const toast = useToast();
+  const [backups, setBackups] = useState<SafetyBackup[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoadError(null);
+    try {
+      const list = await invoke<SafetyBackup[] | null>('list_safety_backups');
+      setBackups(Array.isArray(list) ? list : []);
+    } catch (error) {
+      console.error('Sicherungskopien konnten nicht gelesen werden:', error);
+      setBackups([]);
+      setLoadError(errorMessage(error, 'Die Sicherungskopien konnten nicht gelesen werden.'));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const count = await invoke<number>('delete_safety_backups');
+      setConfirming(false);
+      toast.success(
+        typeof count === 'number' && count !== 1 ? `${count} Sicherungskopien gelöscht.` : 'Sicherungskopie gelöscht.',
+      );
+      await load();
+    } catch (error) {
+      console.error('Sicherungskopien konnten nicht gelöscht werden:', error);
+      setDeleteError(errorMessage(error, 'Die Sicherungskopien konnten nicht gelöscht werden.'));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <Section
+      id="ds-sicherungskopien"
+      title="Automatische Sicherungskopien"
+      description={
+        <>
+          <p>
+            Bevor die App die Datenbank auf die neue Version umstellt und bevor ein Desktop beim ersten Abgleich seinen
+            Stand durch den vom Laptop ersetzt, legt sie eine vollständige Kopie der Datenbank an. Damit lassen sich die
+            Daten wiederherstellen, falls dabei etwas schiefgeht.
+          </p>
+          <p>
+            Die Kopien liegen im selben Ordner wie die Datenbank, enthalten alle Namen und Beobachtungen und sind{' '}
+            <strong className="font-semibold text-ink">nicht verschlüsselt</strong>. Die App löscht sie nicht von
+            selbst. Wenn alles wie erwartet funktioniert, können Sie sie hier löschen.
+          </p>
+        </>
+      }
+    >
+      {backups === null ? (
+        <Spinner size="sm" label="Wird geladen …" />
+      ) : backups.length === 0 ? (
+        <p className="text-ui text-ink-muted">Zurzeit liegen keine Sicherungskopien vor.</p>
+      ) : (
+        <>
+          <ul aria-label="Sicherungskopien" className="max-w-measure border-t border-line">
+            {backups.map((backup) => (
+              <li key={backup.path} className="border-b border-line py-2.5 text-ui">
+                <PathText>{backup.path}</PathText>
+                <p className="mt-0.5 text-small text-ink-muted">
+                  {[backup.created ? `Angelegt ${formatDateTime(backup.created)}` : null, formatSize(backup.size)]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </p>
+              </li>
+            ))}
+          </ul>
+          <div>
+            <Button variant="danger" icon={<Trash2 />} onClick={() => setConfirming(true)}>
+              Sicherungskopien löschen
+            </Button>
+          </div>
+        </>
+      )}
+      {loadError && <InlineError>{loadError}</InlineError>}
+
+      <ConfirmDialog
+        open={confirming}
+        title="Sicherungskopien löschen?"
+        confirmLabel="Endgültig löschen"
+        tone="danger"
+        busy={deleting}
+        error={deleteError}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => setConfirming(false)}
+      >
+        <p>
+          {backups?.length === 1
+            ? 'Die automatisch angelegte Sicherungskopie wird endgültig gelöscht.'
+            : `Die ${backups?.length ?? 0} automatisch angelegten Sicherungskopien werden endgültig gelöscht.`}{' '}
+          Ihre Datenbank und Sicherungen, die Sie selbst erstellt haben, bleiben erhalten.
+        </p>
+        <p>Danach lässt sich der Stand vor der Umstellung bzw. vor dem ersten Abgleich nicht mehr wiederherstellen.</p>
+      </ConfirmDialog>
+    </Section>
+  );
+}
 
 /**
  * Reiter „Datenschutz“: ehrliche Auskunft darüber, wo die Daten liegen, was das Gerät
- * verlässt und wie Auskunft und Löschung funktionieren. Keine Schalter, nur Information.
+ * verlässt und wie Auskunft und Löschung funktionieren. Einzige Aktion: automatisch
+ * angelegte Sicherungskopien löschen (nach Rückfrage).
  */
 export function DatenschutzTab() {
   const databasePath = useAppStore((state) => state.databasePath);
@@ -64,6 +199,8 @@ export function DatenschutzTab() {
           </p>
         </Notice>
       </Section>
+
+      <SafetyBackupsSection />
 
       <Section
         id="ds-weitergabe"

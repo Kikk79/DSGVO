@@ -16,7 +16,7 @@ const OPTIONS: Array<{ value: DeviceRole; title: string; text: string; icon: Rea
   {
     value: 'desktop',
     title: 'Desktop',
-    text: 'Arbeitsplatzrechner. Übernimmt beim ersten Abgleich den Stand vom Laptop; Daten, die hier schon liegen, werden dabei ersetzt.',
+    text: 'Zweitgerät ohne eigene Daten. Beim ersten Abgleich wird alles, was auf diesem Gerät gespeichert ist, durch den Stand vom Laptop ersetzt. Liegen Ihre echten Beobachtungen auf diesem Gerät, wählen Sie bitte „Laptop“.',
     icon: <Monitor aria-hidden="true" className="h-6 w-6" strokeWidth={1.75} />,
   },
 ];
@@ -25,7 +25,8 @@ type LoadState = 'loading' | 'ready' | 'error';
 
 /**
  * Pflichtauswahl der Geräterolle: Solange das Gerät keine Rolle hat, zeigt die App nur diesen
- * Bildschirm. Der Vorschlag aus der Gerätekonfiguration ist vorgewählt, muss aber bestätigt werden.
+ * Bildschirm. Ein Vorschlag (nur bei ausdrücklich gesetztem Gerätetyp) ist vorgewählt, muss aber
+ * bestätigt werden; ohne Vorschlag ist nichts vorgewählt.
  */
 export function DeviceRoleGate({ children }: { children: ReactNode }) {
   const role = useAppStore((state) => state.deviceRole);

@@ -866,13 +866,18 @@ function createHandlers(state: MockState) {
       last_outcome: state.lastOutcome,
     }),
     get_device_role: () => state.deviceRole,
-    get_device_role_suggestion: () => (state.device.device_type === 'notebook' ? 'laptop' : 'desktop'),
+    // Wie role_suggestion in sync_engine.rs: nur bei ausdrücklich gesetztem Gerätetyp
+    get_device_role_suggestion: () =>
+      state.device.device_type === 'notebook' ? 'laptop' : state.device.device_type === 'computer' ? 'desktop' : null,
     set_device_role: (args) => {
       const role = required<string>(args, 'role');
       if (role !== 'laptop' && role !== 'desktop') throw `Invalid device role: ${role}`;
       state.deviceRole = role;
       return null;
     },
+    // Automatische Sicherungskopien: im Browser gibt es keine Dateien neben der Datenbank.
+    list_safety_backups: () => [],
+    delete_safety_backups: () => 0,
     configure_webdav: (args) => {
       state.webdav = {
         url: required<string>(args, 'url'),

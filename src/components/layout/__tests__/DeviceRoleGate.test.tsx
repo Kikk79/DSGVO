@@ -8,7 +8,7 @@ const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
 
 let storedRole: string | null = null;
-let suggestion = 'laptop';
+let suggestion: string | null = 'laptop';
 
 function handlers(command: string): unknown {
   switch (command) {
@@ -49,7 +49,10 @@ describe('DeviceRoleGate', () => {
     renderGate();
     expect(await screen.findByRole('heading', { name: 'Welches Gerät ist das?' })).toBeInTheDocument();
     expect(screen.getByText('Hier sammeln Sie Beobachtungen. Dieser Stand ist maßgeblich.')).toBeInTheDocument();
-    expect(screen.getByText(/Übernimmt beim ersten Abgleich den Stand vom Laptop/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Beim ersten Abgleich wird alles, was auf diesem Gerät gespeichert ist, durch den Stand vom Laptop ersetzt/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Liegen Ihre echten Beobachtungen auf diesem Gerät, wählen Sie bitte „Laptop“/)).toBeInTheDocument();
     expect(screen.queryByText('Die App')).not.toBeInTheDocument();
   });
 
@@ -60,6 +63,16 @@ describe('DeviceRoleGate', () => {
     await waitFor(() => expect(desktop).toBeChecked());
     expect(screen.getByRole('radio', { name: /^Laptop/ })).not.toBeChecked();
     expect(screen.queryByText('Die App')).not.toBeInTheDocument();
+  });
+
+  it('wählt ohne Vorschlag (Gerätetyp unbekannt) nichts vor', async () => {
+    suggestion = null;
+    renderGate();
+    const next = await screen.findByRole('button', { name: 'Weiter' });
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_device_role_suggestion'));
+    expect(screen.getByRole('radio', { name: /^Laptop/ })).not.toBeChecked();
+    expect(screen.getByRole('radio', { name: /^Desktop/ })).not.toBeChecked();
+    expect(next).toBeDisabled();
   });
 
   it('hält „Weiter“ ohne Auswahl gesperrt', async () => {

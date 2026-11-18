@@ -5,6 +5,7 @@ import { useAppStore } from '../../stores/appStore';
 import { currentSchoolYear, formatRecent } from '../../lib/format';
 import { cx } from '../../lib/cx';
 import { useObservationEditor } from '../observations/editorContext';
+import { WAITING_DATA_LOSS_WARNING, WAITING_TEXT } from '../../lib/syncTexts';
 
 const NAV_ITEMS = [
   { to: '/', label: 'Heute', end: true },
@@ -16,7 +17,7 @@ const NAV_ITEMS = [
 const SYNC_REFRESH_MS = 60_000;
 
 /** Einzeilige Anzeige des WebDAV-Abgleichs am Fuß der Seitenleiste. */
-function SyncStatusLink() {
+export function SyncStatusLink() {
   const sync = useAppStore((state) => state.webdavSync);
   const getWebDavSyncStatus = useAppStore((state) => state.getWebDavSyncStatus);
   const deviceRole = useAppStore((state) => state.deviceRole);
@@ -32,6 +33,8 @@ function SyncStatusLink() {
 
   let icon: ReactNode;
   let text: string;
+  /** Zusätzlicher Warnhinweis (sichtbar und als Tooltip). */
+  let warning: string | null = null;
   if (sync.status === 'syncing') {
     icon = <RefreshCw aria-hidden="true" className="h-3.5 w-3.5 animate-spin text-marker" />;
     text = 'Synchronisiert gerade …';
@@ -48,8 +51,9 @@ function SyncStatusLink() {
     icon = <AlertTriangle aria-hidden="true" className="h-3.5 w-3.5 text-marker" />;
     text = 'Kein Laptop gefunden. Bitte auf dem Laptop einmal synchronisieren.';
   } else if (sync.lastOutcome === 'waiting_for_laptop' || (deviceRole === 'desktop' && sync.firstSyncDone === false)) {
-    icon = <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />;
-    text = 'Warte auf den Stand vom Laptop';
+    icon = <AlertTriangle aria-hidden="true" className="h-3.5 w-3.5 text-marker" />;
+    text = WAITING_TEXT;
+    warning = WAITING_DATA_LOSS_WARNING;
   } else if (sync.lastSyncTime) {
     icon = <Check aria-hidden="true" className="h-3.5 w-3.5" />;
     text = `Synchronisiert: ${formatRecent(sync.lastSyncTime)}`;
@@ -62,10 +66,14 @@ function SyncStatusLink() {
   return (
     <Link
       to="/einstellungen/synchronisation"
+      title={warning ?? undefined}
       className="flex items-start gap-2 rounded-sm px-2 py-1.5 text-small leading-snug text-kreide-muted transition-colors hover:text-kreide"
     >
       <span className="mt-[3px] shrink-0">{icon}</span>
-      <span role="status">{text}</span>
+      <span role="status">
+        {text}
+        {warning && <span className="mt-1 block font-semibold text-kreide">{warning}</span>}
+      </span>
     </Link>
   );
 }

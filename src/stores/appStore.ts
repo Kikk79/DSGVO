@@ -270,7 +270,8 @@ interface AppState {
   // Device role (Laptop/Desktop)
   deviceRole: DeviceRole | null;
   getDeviceRole: () => Promise<DeviceRole | null>;
-  getDeviceRoleSuggestion: () => Promise<DeviceRole>;
+  /** Vorschlag nur bei ausdrücklich gesetztem Gerätetyp, sonst null (keine Vorbelegung). */
+  getDeviceRoleSuggestion: () => Promise<DeviceRole | null>;
   setDeviceRole: (role: DeviceRole) => Promise<void>;
 
   // WebDAV Sync Management
@@ -787,8 +788,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     return role;
   },
 
-  getDeviceRoleSuggestion: async (): Promise<DeviceRole> => {
-    return (await invoke('get_device_role_suggestion')) as DeviceRole;
+  getDeviceRoleSuggestion: async (): Promise<DeviceRole | null> => {
+    const suggestion = await invoke('get_device_role_suggestion');
+    return suggestion === 'laptop' || suggestion === 'desktop' ? suggestion : null;
   },
 
   setDeviceRole: async (role: DeviceRole) => {

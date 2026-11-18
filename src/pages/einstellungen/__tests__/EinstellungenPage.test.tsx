@@ -63,6 +63,8 @@ const notConfigured = {
   last_outcome: null,
 };
 let syncStatus: Record<string, unknown> = notConfigured;
+let safetyBackups: Array<{ path: string; size: number; created: string | null }> = [];
+let importResult = 'Daten eingelesen: 0 neu, 0 aktualisiert, 0 gelöscht';
 
 function handlers(command: string): unknown {
   switch (command) {
@@ -80,6 +82,15 @@ function handlers(command: string): unknown {
       return 'C:\\Users\\lehrkraft\\AppData\\Roaming\\schuelerbeobachtung\\observations.db';
     case 'get_device_config':
       return { device_type: 'notebook', device_name: 'Notebook' };
+    case 'list_safety_backups':
+      return safetyBackups;
+    case 'delete_safety_backups': {
+      const count = safetyBackups.length;
+      safetyBackups = [];
+      return count;
+    }
+    case 'import_changeset_data':
+      return importResult;
     case 'import_full_backup_data':
       return 'Sicherung eingespielt: 11 neu, 0 aktualisiert, 0 gelöscht';
     default:
@@ -107,6 +118,8 @@ function renderAt(path: string) {
 
 beforeEach(() => {
   syncStatus = notConfigured;
+  safetyBackups = [];
+  importResult = 'Daten eingelesen: 0 neu, 0 aktualisiert, 0 gelöscht';
   invokeMock.mockReset();
   invokeMock.mockImplementation((command: string) => Promise.resolve(handlers(command)));
   useAppStore.setState({
@@ -259,6 +272,9 @@ describe('EinstellungenPage', () => {
     renderAt('/einstellungen/synchronisation');
     const panel = await screen.findByRole('tabpanel');
     expect(await within(panel).findByText('Warte auf den Stand vom Laptop')).toBeInTheDocument();
+    expect(panel).toHaveTextContent(
+      'Bis der Stand vom Laptop übernommen ist, gehen Einträge auf diesem Gerät beim ersten Abgleich verloren. Erfassen Sie bitte noch nichts.',
+    );
     expect(panel).toHaveTextContent('Desktop');
     expect(panel).toHaveTextContent('Rechneruhr weicht 3 Sekunden von der Serverzeit ab');
   });
@@ -269,6 +285,64 @@ describe('EinstellungenPage', () => {
     expect(
       await screen.findByText('Kein Laptop gefunden. Bitte auf dem Laptop einmal synchronisieren.'),
     ).toBeInTheDocument();
+  });
+
+  it('warnt beim Wechsel zu Desktop vor dem Ersetzen, solange der erste Abgleich aussteht', async () => {
+    syncStatus = { ...configuredStatus, device_role: 'laptop', first_sync_done: false, last_outcome: 'synced' };
+    useAppStore.setState({ deviceRole: 'laptop' });
+    renderAt('/einstellungen/synchronisation');
+    await screen.findByText('Eingerichtet und aktiv');
+    await userEvent.click(screen.getByRole('button', { name: 'Rolle ändern' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop' }));
+    const panel = screen.getByRole('tabpanel');
+    expect(panel).toHaveTextContent('Daten auf diesem Gerät werden ersetzt');
+    expect(panel).toHaveTextContent('wählen Sie nicht „Desktop“, sondern „Laptop“');
+  });
+
+  it('kündigt beim Wechsel zu Desktop kein Ersetzen an, wenn der erste Abgleich schon lief', async () => {
+    syncStatus = { ...configuredStatus, device_role: 'laptop', first_sync_done: true, last_outcome: 'synced' };
+    useAppStore.setState({ deviceRole: 'laptop' });
+    renderAt('/einstellungen/synchronisation');
+    await screen.findByText('Eingerichtet und aktiv');
+    await userEvent.click(screen.getByRole('button', { name: 'Rolle ändern' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop' }));
+    const panel = screen.getByRole('tabpanel');
+    expect(panel).toHaveTextContent('Mit der Rolle Desktop wird hier nichts ersetzt');
+    expect(panel).not.toHaveTextContent('Daten auf diesem Gerät werden ersetzt');
+  });
+
+  it('meldet nach dem Einlesen einer Änderungsdatei die deutschen Zählungen des Backends', async () => {
+    importResult = 'Daten eingelesen: 3 neu, 1 aktualisiert, 0 gelöscht (2 Beobachtungen übersprungen: Schüler nicht vorhanden)';
+    renderAt('/einstellungen/synchronisation');
+    const file = new File(['{"checksum":"x","data":{}}'], 'aenderungen.dat');
+    fireEvent.change(await screen.findByTestId('changeset-file'), { target: { files: [file] } });
+    expect(
+      await screen.findByText(
+        'Änderungsdatei eingelesen: 3 neu, 1 aktualisiert. 2 Beobachtungen wurden übersprungen, weil der Schüler fehlt.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('nennt die automatischen Sicherungskopien und löscht sie erst nach Bestätigung', async () => {
+    safetyBackups = [
+      { path: '/daten/observations.db.vor-sync-v2-20261117-101500.bak', size: 204800, created: '2026-11-17T10:15:00Z' },
+      { path: '/daten/observations.db.vor-erstabgleich-20261118-090000.bak', size: 3145728, created: null },
+    ];
+    renderAt('/einstellungen/datenschutz');
+    expect(await screen.findByText('/daten/observations.db.vor-sync-v2-20261117-101500.bak')).toBeInTheDocument();
+    expect(screen.getByText('/daten/observations.db.vor-erstabgleich-20261118-090000.bak')).toBeInTheDocument();
+    expect(screen.getByRole('tabpanel')).toHaveTextContent('löscht sie nicht von selbst');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sicherungskopien löschen' }));
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent('2 automatisch angelegten Sicherungskopien werden endgültig gelöscht');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Abbrechen' }));
+    expect(invokeMock).not.toHaveBeenCalledWith('delete_safety_backups');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sicherungskopien löschen' }));
+    await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Endgültig löschen' }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('delete_safety_backups'));
+    expect(await screen.findByText('Zurzeit liegen keine Sicherungskopien vor.')).toBeInTheDocument();
   });
 
   it('ändert die Geräterolle über den Reiter', async () => {
