@@ -211,6 +211,95 @@ pub(crate) async fn write_labeled_backup(
     Ok(backup)
 }
 
+/// Bezeichnungen der automatisch angelegten Sicherungskopien (siehe `write_labeled_backup`).
+const SAFETY_BACKUP_LABELS: [&str; 2] = ["vor-sync-v2", "vor-erstabgleich"];
+
+/// Eine automatisch angelegte Sicherungskopie neben der Datenbank.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SafetyBackup {
+    pub path: String,
+    pub size: u64,
+    /// Erstellungszeit (ersatzweise letzte Änderung) als RFC 3339, falls bekannt.
+    pub created: Option<String>,
+}
+
+/// Ist `name` eine Sicherungskopie der Datenbank `db_file_name`?
+/// Nur `<db>.vor-sync-v2-….bak` und `<db>.vor-erstabgleich-….bak`; nie die Datenbank selbst.
+pub(crate) fn is_safety_backup_name(name: &str, db_file_name: &str) -> bool {
+    if name == db_file_name || !name.ends_with(".bak") {
+        return false;
+    }
+    SAFETY_BACKUP_LABELS.iter().any(|label| {
+        let prefix = format!("{}.{}-", db_file_name, label);
+        name.len() > prefix.len() + ".bak".len() && name.starts_with(&prefix)
+    })
+}
+
+/// Pfade aller Sicherungskopien im Ordner der Datenbank (nur reguläre Dateien), sortiert.
+fn safety_backup_paths(db_path: &Path) -> Result<Vec<PathBuf>> {
+    let db_file_name = db_path
+        .file_name()
+        .ok_or_else(|| anyhow!("Datenbankpfad ohne Dateinamen: {}", db_path.display()))?
+        .to_string_lossy()
+        .to_string();
+    let dir = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let mut paths = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
+        Err(e) => return Err(e).with_context(|| format!("Ordner {} lesen", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_safety_backup_name(&name, &db_file_name) {
+            continue;
+        }
+        // Keine Ordner, keine symbolischen Verknüpfungen
+        if entry.file_type()?.is_file() {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// Automatisch angelegte Sicherungskopien neben der Datenbank (Pfad, Größe, Zeitpunkt).
+pub fn list_safety_backups(db_path: &Path) -> Result<Vec<SafetyBackup>> {
+    safety_backup_paths(db_path)?
+        .into_iter()
+        .map(|path| {
+            let meta = std::fs::metadata(&path)
+                .with_context(|| format!("Datei {} lesen", path.display()))?;
+            let created = meta
+                .created()
+                .or_else(|_| meta.modified())
+                .ok()
+                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+            Ok(SafetyBackup {
+                path: path.to_string_lossy().to_string(),
+                size: meta.len(),
+                created,
+            })
+        })
+        .collect()
+}
+
+/// Löscht die automatisch angelegten Sicherungskopien (nur die beiden Namensmuster im Ordner
+/// der Datenbank). Gibt die gelöschten Pfade zurück.
+pub fn delete_safety_backups(db_path: &Path) -> Result<Vec<String>> {
+    let mut deleted = Vec::new();
+    for path in safety_backup_paths(db_path)? {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("Sicherungskopie {} konnte nicht gelöscht werden", path.display()))?;
+        deleted.push(path.to_string_lossy().to_string());
+    }
+    Ok(deleted)
+}
+
 async fn migrate_in_transaction(conn: &mut SqliteConnection) -> Result<()> {
     let mut tx = conn.begin().await?;
 
@@ -448,6 +537,75 @@ async fn foreign_key_violations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safety_backup_name_matches_only_the_two_patterns() {
+        let db = "observations.db";
+        assert!(is_safety_backup_name("observations.db.vor-sync-v2-20261117-101500.bak", db));
+        assert!(is_safety_backup_name("observations.db.vor-sync-v2-20261117-101500-1.bak", db));
+        assert!(is_safety_backup_name("observations.db.vor-erstabgleich-20261117-101500.bak", db));
+        // nie die Datenbank selbst oder andere Dateien
+        assert!(!is_safety_backup_name("observations.db", db));
+        assert!(!is_safety_backup_name("observations.db-wal", db));
+        assert!(!is_safety_backup_name("observations.db-shm", db));
+        assert!(!is_safety_backup_name("audit.db", db));
+        assert!(!is_safety_backup_name("observations.db.bak", db));
+        assert!(!is_safety_backup_name("observations.db.vor-sync-v2-.bak", db));
+        assert!(!is_safety_backup_name("observations.db.vor-sync-v2-20261117.db", db));
+        assert!(!is_safety_backup_name("andere.db.vor-sync-v2-20261117-101500.bak", db));
+        assert!(!is_safety_backup_name("observations.db.vor-update-20261117.bak", db));
+        assert!(!is_safety_backup_name("sicherung.json", db));
+    }
+
+    #[test]
+    fn delete_safety_backups_removes_only_matching_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("observations.db");
+        let keep = [
+            "observations.db",
+            "observations.db-wal",
+            "audit.db",
+            "config.json",
+            "observations.db.bak",
+            "andere.db.vor-erstabgleich-20261117-101500.bak",
+        ];
+        let remove = [
+            "observations.db.vor-sync-v2-20261117-101500.bak",
+            "observations.db.vor-erstabgleich-20261118-090000.bak",
+        ];
+        for name in keep.iter().chain(remove.iter()) {
+            std::fs::write(dir.path().join(name), b"inhalt").unwrap();
+        }
+        // Ein Ordner mit passendem Namen bleibt unangetastet
+        std::fs::create_dir(dir.path().join("observations.db.vor-sync-v2-ordner.bak")).unwrap();
+
+        let listed = list_safety_backups(&db).unwrap();
+        let names: Vec<String> = listed
+            .iter()
+            .map(|b| Path::new(&b.path).file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec![remove[1].to_string(), remove[0].to_string()]);
+        assert!(listed.iter().all(|b| b.size == 6 && b.created.is_some()));
+
+        let deleted = delete_safety_backups(&db).unwrap();
+        assert_eq!(deleted.len(), 2);
+        for name in keep {
+            assert!(dir.path().join(name).exists(), "{} muss bleiben", name);
+        }
+        for name in remove {
+            assert!(!dir.path().join(name).exists(), "{} muss weg sein", name);
+        }
+        assert!(dir.path().join("observations.db.vor-sync-v2-ordner.bak").is_dir());
+        assert!(list_safety_backups(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_safety_backups_tolerates_missing_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("fehlt").join("observations.db");
+        assert!(list_safety_backups(&db).unwrap().is_empty());
+        assert!(delete_safety_backups(&db).unwrap().is_empty());
+    }
 
     #[test]
     fn derived_uuid_is_v5_and_stable() {

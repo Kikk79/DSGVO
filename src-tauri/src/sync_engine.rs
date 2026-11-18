@@ -69,11 +69,15 @@ impl Serialize for SyncOutcome {
     }
 }
 
-/// Vorbelegung der Rollenauswahl aus dem Gerätetyp (`notebook` → Laptop, sonst Desktop).
-pub fn role_suggestion(device_type: Option<&str>) -> &'static str {
+/// Vorbelegung der Rollenauswahl aus dem Gerätetyp: nur bei ausdrücklich gesetztem Typ
+/// (`notebook` → Laptop, `computer` → Desktop). Sonst kein Vorschlag – eine falsche
+/// Vorbelegung „Desktop“ auf dem Gerät mit den echten Daten würde diese beim ersten Abgleich
+/// ersetzen.
+pub fn role_suggestion(device_type: Option<&str>) -> Option<&'static str> {
     match device_type {
-        Some("notebook") => ROLE_LAPTOP,
-        _ => ROLE_DESKTOP,
+        Some("notebook") => Some(ROLE_LAPTOP),
+        Some("computer") => Some(ROLE_DESKTOP),
+        _ => None,
     }
 }
 
@@ -1331,6 +1335,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_shutdown_sync_skips_when_another_sync_runs() {
+        let dav = FakeDav::start().await;
+        let me = device("laptop-1", Some("laptop")).await;
+        let lock = Arc::new(Mutex::new(()));
+        let m = manager(&dav.url, &lock);
+        let _busy = lock.lock().await;
+        let started = std::time::Instant::now();
+        let r = m
+            .sync_on_shutdown(&me.db, None, std::time::Duration::from_secs(10))
+            .await;
+        assert!(matches!(r, crate::webdav_sync::ShutdownSync::Busy), "{:?}", r);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(dav.state.lock().unwrap().log.is_empty(), "kein Netzwerkzugriff");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_sync_times_out_and_releases_lock() {
+        let dav = FakeDav::start().await;
+        let laptop = device("laptop-1", Some("laptop")).await;
+        laptop.seed("5a", "Max", "vom Laptop").await;
+        synced(laptop.sync(&dav).await.unwrap());
+
+        let desktop = device("desktop-1", Some("desktop")).await;
+        let gate = Arc::new(Gate::default());
+        dav.state.lock().unwrap().gate = Some(gate.clone()); // Herunterladen hängt
+        let lock = Arc::new(Mutex::new(()));
+        let m = manager(&dav.url, &lock);
+        let r = m
+            .sync_on_shutdown(&desktop.db, None, std::time::Duration::from_millis(300))
+            .await;
+        assert!(matches!(r, crate::webdav_sync::ShutdownSync::TimedOut), "{:?}", r);
+        assert!(lock.try_lock().is_ok(), "Sperre wieder frei");
+        assert!(!desktop.db.lock().await.is_first_sync_done().await.unwrap());
+        dav.state.lock().unwrap().gate = None;
+        gate.release.notify_one();
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_sync_runs_when_idle() {
+        let dav = FakeDav::start().await;
+        let me = device("laptop-1", Some("laptop")).await;
+        me.seed("5a", "Max", "eigene").await;
+        let lock = Arc::new(Mutex::new(()));
+        let m = manager(&dav.url, &lock);
+        let r = m
+            .sync_on_shutdown(&me.db, None, std::time::Duration::from_secs(10))
+            .await;
+        match r {
+            crate::webdav_sync::ShutdownSync::Done(Ok(outcome)) => {
+                synced(outcome);
+            }
+            other => panic!("{:?}", other),
+        }
+        assert!(dav.names().contains(&"snapshot_laptop-1.json".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_sync_after_role_choice_runs_immediately() {
+        let dav = FakeDav::start().await;
+        let laptop = device("laptop-1", Some("laptop")).await;
+        laptop.seed("5a", "Max", "vom Laptop").await;
+        synced(laptop.sync(&dav).await.unwrap());
+
+        let dir = TempDir::new().unwrap();
+        let db = Database::open_for_test(&dir.path().join("t.db"), "desktop-1", 0)
+            .await
+            .unwrap();
+        db.set_device_role("desktop").await.unwrap();
+        let db = Arc::new(Mutex::new(db));
+        let lock = Arc::new(Mutex::new(()));
+        let m = manager(&dav.url, &lock);
+        m.clone().spawn_sync(db.clone(), None, "Rollenwahl").await.unwrap();
+        assert_eq!(m.get_last_outcome().as_deref(), Some("synced"));
+        assert!(db.lock().await.is_first_sync_done().await.unwrap());
+    }
+
+    #[tokio::test]
     async fn test_role_change_to_laptop_mid_sync_prevents_replace() {
         let dav = FakeDav::start().await;
         let laptop = device("laptop-1", Some("laptop")).await;
@@ -1493,8 +1574,10 @@ mod tests {
 
     #[test]
     fn test_role_suggestion() {
-        assert_eq!(role_suggestion(Some("notebook")), "laptop");
-        assert_eq!(role_suggestion(Some("computer")), "desktop");
-        assert_eq!(role_suggestion(None), "desktop");
+        assert_eq!(role_suggestion(Some("notebook")), Some("laptop"));
+        assert_eq!(role_suggestion(Some("computer")), Some("desktop"));
+        assert_eq!(role_suggestion(None), None);
+        assert_eq!(role_suggestion(Some("unknown")), None);
+        assert_eq!(role_suggestion(Some("")), None);
     }
 }

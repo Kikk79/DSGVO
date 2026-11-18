@@ -172,6 +172,49 @@ pub struct AppState {
     pub sync_run_lock: Arc<Mutex<()>>,
 }
 
+/// Erklärung, wenn die Datenbank beim Start nicht geöffnet bzw. umgestellt werden kann.
+fn startup_failure_text(db_path: &std::path::Path, error: &str) -> String {
+    format!(
+        "Die Schülerbeobachtung konnte nicht starten, weil die Datenbank nicht geöffnet oder \
+         nicht auf die neue Version umgestellt werden konnte.\n\n\
+         Ihre Daten sind unverändert. Bitte löschen oder verschieben Sie die Datenbankdatei nicht.\n\n\
+         Datenbankdatei:\n{}\n\n\
+         Technische Ursache:\n{}\n\n\
+         Bitte geben Sie diese Meldung an die Person weiter, die die App betreut.",
+        db_path.display(),
+        error
+    )
+}
+
+/// Schreibt die Erklärung als Textdatei neben die Datenbank (falls der Ordner beschreibbar ist).
+fn write_startup_failure_note(db_path: &std::path::Path, text: &str) -> Option<std::path::PathBuf> {
+    let note = db_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("schuelerbeobachtung-startfehler.txt");
+    std::fs::write(&note, text).ok().map(|_| note)
+}
+
+/// Startfehler der Datenbank: protokollieren, Erklärung neben die Datenbank schreiben, Fenster
+/// verbergen, Fehlermeldung zeigen und die App danach mit Code 1 beenden. Kein Panic.
+fn report_startup_failure(app: &tauri::App, db_path: &std::path::Path, error: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    let text = startup_failure_text(db_path, error);
+    eprintln!("Start abgebrochen: {}", text);
+    if let Some(note) = write_startup_failure_note(db_path, &text) {
+        eprintln!("Erklärung gespeichert: {}", note.display());
+    }
+    for window in app.webview_windows().values() {
+        let _ = window.hide();
+    }
+    let handle = app.handle().clone();
+    app.dialog()
+        .message(text)
+        .title("Schülerbeobachtung kann nicht starten")
+        .kind(MessageDialogKind::Error)
+        .show(move |_| handle.exit(1));
+}
+
 // Tauri commands
 #[tauri::command]
 async fn get_sync_status(_state: tauri::State<'_, AppState>) -> Result<SyncStatus, String> {
@@ -1044,16 +1087,54 @@ async fn set_device_role(state: tauri::State<'_, AppState>, role: String) -> Res
         )
         .await
         .map_err(|e| e.to_string())?;
+    // Gleich abgleichen statt bis zum nächsten 3-Minuten-Takt zu warten.
+    if let Some(manager) = current_sync_manager(&state).await {
+        manager.spawn_sync(state.db.clone(), Some(state.audit.clone()), "Rollenwahl");
+    }
     Ok(())
 }
 
+/// Automatisch angelegte Sicherungskopien (`*.vor-sync-v2-*.bak`, `*.vor-erstabgleich-*.bak`)
+/// im Ordner der Datenbank.
 #[tauri::command]
-async fn get_device_role_suggestion(state: tauri::State<'_, AppState>) -> Result<String, String> {
+async fn list_safety_backups(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<sync_schema::SafetyBackup>, String> {
+    let db_path = state.db.lock().await.db_path().to_path_buf();
+    sync_schema::list_safety_backups(&db_path).map_err(|e| format!("{:#}", e))
+}
+
+/// Löscht nur die automatisch angelegten Sicherungskopien; gibt die Anzahl zurück.
+#[tauri::command]
+async fn delete_safety_backups(state: tauri::State<'_, AppState>) -> Result<usize, String> {
+    let db_path = state.db.lock().await.db_path().to_path_buf();
+    let deleted = sync_schema::delete_safety_backups(&db_path).map_err(|e| format!("{:#}", e))?;
+    state
+        .audit
+        .log_action(
+            "delete",
+            "safety_backups",
+            0,
+            1,
+            Some(&serde_json::json!({ "count": deleted.len() }).to_string()),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(deleted.len())
+}
+
+#[tauri::command]
+async fn get_device_role_suggestion(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<String>, String> {
     let config = state
         .crypto
         .get_device_config()
         .map_err(|e| e.to_string())?;
-    Ok(sync_engine::role_suggestion(config.get("device_type").map(|s| s.as_str())).to_string())
+    Ok(
+        sync_engine::role_suggestion(config.get("device_type").map(|s| s.as_str()))
+            .map(str::to_string),
+    )
 }
 
 #[tauri::command]
@@ -1138,10 +1219,15 @@ fn main() {
                 app_data_dir.join("observations.db")
             };
 
-            let db = tauri::async_runtime::block_on(async {
-                database::Database::new(db_path, crypto.clone()).await
-            })
-            .unwrap();
+            let db = match tauri::async_runtime::block_on(async {
+                database::Database::new(&db_path, crypto.clone()).await
+            }) {
+                Ok(db) => db,
+                Err(e) => {
+                    report_startup_failure(app, &db_path, &format!("{:#}", e));
+                    return Ok(());
+                }
+            };
 
             // Initialize audit logger
             let audit_path = app_data_dir.join("audit.db");
@@ -1192,13 +1278,34 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let app_handle = window.app_handle();
                 
-                // Abgleich beim Beenden
+                // Abgleich beim Beenden: nie auf einen laufenden Abgleich warten und höchstens
+                // 10 Sekunden, damit das Fenster nicht hängt.
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     tauri::async_runtime::block_on(async {
                         if let Some(sync_manager) = current_sync_manager(&state).await {
-                            sync_manager
-                                .sync_logged(&state.db, Some(&state.audit), "Beenden")
-                                .await;
+                            use webdav_sync::ShutdownSync;
+                            match sync_manager
+                                .sync_on_shutdown(
+                                    &state.db,
+                                    Some(&state.audit),
+                                    std::time::Duration::from_secs(10),
+                                )
+                                .await
+                            {
+                                ShutdownSync::NotConfigured => {}
+                                ShutdownSync::Busy => eprintln!(
+                                    "Abgleich (Beenden) übersprungen: es läuft gerade ein anderer Abgleich"
+                                ),
+                                ShutdownSync::TimedOut => eprintln!(
+                                    "Abgleich (Beenden) nach 10 Sekunden abgebrochen"
+                                ),
+                                ShutdownSync::Done(Ok(outcome)) => {
+                                    println!("Abgleich (Beenden): {}", outcome.as_str())
+                                }
+                                ShutdownSync::Done(Err(e)) => {
+                                    eprintln!("Abgleich (Beenden) fehlgeschlagen: {:#}", e)
+                                }
+                            }
                         }
                     });
                 }
@@ -1253,8 +1360,34 @@ fn main() {
             disable_webdav_sync,
             get_device_role,
             set_device_role,
-            get_device_role_suggestion
+            get_device_role_suggestion,
+            list_safety_backups,
+            delete_safety_backups
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn test_startup_failure_text_names_path_and_unchanged_data() {
+        let path = std::path::Path::new("/daten/observations.db");
+        let text = startup_failure_text(path, "categories: unbekannte Spalte icon");
+        assert!(text.contains("Ihre Daten sind unverändert"));
+        assert!(text.contains("/daten/observations.db"));
+        assert!(text.contains("unbekannte Spalte icon"));
+    }
+
+    #[test]
+    fn test_startup_failure_note_written_next_to_db() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("observations.db");
+        let note = write_startup_failure_note(&db, "Erklärung").unwrap();
+        assert_eq!(note.parent().unwrap(), dir.path());
+        assert_eq!(std::fs::read_to_string(note).unwrap(), "Erklärung");
+        assert!(!db.exists(), "die Datenbank selbst wird nicht angelegt oder verändert");
+    }
 }

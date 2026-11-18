@@ -1505,6 +1505,11 @@ impl Database {
         Ok(q.fetch_one(&self.pool).await? > 0)
     }
 
+    /// Pfad der Datenbankdatei.
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+
     /// Sicherungskopie `<db>.vor-erstabgleich-<zeit>.bak` vor dem Ersetzen beim ersten Abgleich.
     pub async fn backup_before_first_sync(&self) -> Result<PathBuf> {
         crate::sync_schema::write_labeled_backup(&self.pool, &self.db_path, "vor-erstabgleich")

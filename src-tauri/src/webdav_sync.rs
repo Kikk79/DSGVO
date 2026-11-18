@@ -278,6 +278,17 @@ impl WebDavClient {
     }
 }
 
+/// Ergebnis von `WebDavSyncManager::sync_on_shutdown`.
+#[derive(Debug)]
+pub enum ShutdownSync {
+    NotConfigured,
+    /// Ein anderer Abgleich lief gerade; übersprungen.
+    Busy,
+    /// Zeitlimit überschritten; abgebrochen.
+    TimedOut,
+    Done(Result<SyncOutcome>),
+}
+
 /// Hält die WebDAV-Verbindung und löst Abgleiche aus (Start, alle 3 Minuten, Beenden,
 /// manuell). Jeder Abgleich läuft über `sync_engine::run_sync`.
 ///
@@ -352,7 +363,21 @@ impl WebDavSyncManager {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("WebDAV ist nicht eingerichtet"))?;
         let _running = self.run_lock.lock().await;
-        let result = run_sync(db, &client, audit).await;
+        self.run_locked(&client, db, audit).await
+    }
+
+    fn current_client(&self) -> Option<Arc<WebDavClient>> {
+        self.client.lock().unwrap().clone()
+    }
+
+    /// Abgleich bei bereits gehaltenem `run_lock`; merkt Ergebnis bzw. Zeitpunkt.
+    async fn run_locked(
+        &self,
+        client: &WebDavClient,
+        db: &Mutex<Database>,
+        audit: Option<&AuditLogger>,
+    ) -> Result<SyncOutcome> {
+        let result = run_sync(db, client, audit).await;
         match &result {
             Ok(outcome) => {
                 *self.last_outcome.lock().unwrap() = Some(outcome.as_str().to_string());
@@ -371,6 +396,39 @@ impl WebDavSyncManager {
             Ok(outcome) => println!("Abgleich ({}): {}", what, outcome.as_str()),
             Err(e) => eprintln!("Abgleich ({}) fehlgeschlagen: {:#}", what, e),
         }
+    }
+
+    /// Abgleich beim Schließen des Fensters: läuft nur, wenn gerade kein anderer Abgleich
+    /// läuft (`try_lock`), und höchstens `limit` lang – das Fenster darf nicht hängen.
+    pub async fn sync_on_shutdown(
+        &self,
+        db: &Mutex<Database>,
+        audit: Option<&AuditLogger>,
+        limit: Duration,
+    ) -> ShutdownSync {
+        let Some(client) = self.current_client() else {
+            return ShutdownSync::NotConfigured;
+        };
+        let Ok(_running) = self.run_lock.try_lock() else {
+            return ShutdownSync::Busy;
+        };
+        match tokio::time::timeout(limit, self.run_locked(&client, db, audit)).await {
+            Ok(result) => ShutdownSync::Done(result),
+            Err(_) => ShutdownSync::TimedOut,
+        }
+    }
+
+    /// Startet sofort einen Abgleich im Hintergrund (z. B. nach der Wahl der Geräterolle),
+    /// statt bis zum nächsten 3-Minuten-Takt zu warten.
+    pub fn spawn_sync(
+        self: Arc<Self>,
+        db: Arc<Mutex<Database>>,
+        audit: Option<Arc<AuditLogger>>,
+        what: &'static str,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            self.sync_logged(&db, audit.as_deref(), what).await;
+        })
     }
 
     /// Hintergrund-Abgleich alle 3 Minuten (erster Lauf nach 3 Minuten).
