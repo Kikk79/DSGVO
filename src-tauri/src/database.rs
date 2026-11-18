@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use sha2::Digest;
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use crate::sync_schema::derived_uuid;
-use crate::sync_time::{format_ts, SyncClock};
+use crate::sync_time::{format_ts, parse_ts, SyncClock};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -732,10 +732,50 @@ impl Database {
         text: String,
         tags: Vec<String>,
     ) -> Result<Observation> {
+        self.create_observation_at(student_id, author_id, category, text, tags, None)
+            .await
+    }
+
+    /// Prüft einen vom Benutzer gewählten Erstellzeitpunkt (RFC 3339) und gibt ihn im
+    /// Speicherformat zurück: nicht vor dem 1.1.2000, höchstens 5 Minuten nach Serverzeit.
+    pub fn validate_created_at(&self, created_at: &str) -> Result<String> {
+        let parsed = parse_ts(created_at)
+            .map_err(|_| anyhow::anyhow!("Das Datum der Beobachtung ist ungültig."))?;
+        let earliest = chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+            .expect("konstantes Datum")
+            .with_timezone(&chrono::Utc);
+        if parsed < earliest {
+            return Err(anyhow::anyhow!(
+                "Das Datum der Beobachtung darf nicht vor dem 1. Januar 2000 liegen."
+            ));
+        }
+        if parsed > self.now() + chrono::Duration::minutes(5) {
+            return Err(anyhow::anyhow!(
+                "Das Datum der Beobachtung darf nicht in der Zukunft liegen."
+            ));
+        }
+        Ok(format_ts(parsed))
+    }
+
+    /// Wie `create_observation`; `created_at` (RFC 3339) setzt den Erstellzeitpunkt,
+    /// ohne Angabe gilt die aktuelle Serverzeit.
+    pub async fn create_observation_at(
+        &self,
+        student_id: i64,
+        author_id: i64,
+        category: String,
+        text: String,
+        tags: Vec<String>,
+        created_at: Option<String>,
+    ) -> Result<Observation> {
         Self::validate_observation_content(&category, &text)?;
         let device_id = self.crypto.get_device_id();
         let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
         let now = self.now_ts();
+        let created = match created_at.as_deref() {
+            Some(value) => self.validate_created_at(value)?,
+            None => now.clone(),
+        };
 
         let observation = sqlx::query_as::<_, Observation>(
             r#"
@@ -752,7 +792,7 @@ impl Database {
         .bind(&device_id)
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&device_id)
-        .bind(&now)
+        .bind(&created)
         .bind(&now)
         .fetch_one(&self.pool)
         .await
@@ -789,20 +829,39 @@ impl Database {
         text: String,
         tags: Vec<String>,
     ) -> Result<Observation> {
+        self.update_observation_at(observation_id, category, text, tags, None)
+            .await
+    }
+
+    /// Wie `update_observation`; `created_at` (RFC 3339) ändert zusätzlich den
+    /// Erstellzeitpunkt, ohne Angabe bleibt er unverändert.
+    pub async fn update_observation_at(
+        &self,
+        observation_id: i64,
+        category: String,
+        text: String,
+        tags: Vec<String>,
+        created_at: Option<String>,
+    ) -> Result<Observation> {
         Self::validate_observation_content(&category, &text)?;
+        let new_created = created_at
+            .as_deref()
+            .map(|value| self.validate_created_at(value))
+            .transpose()?;
 
         let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
 
-        // student_id, author_id, created_at and source_device_id stay untouched: together
-        // with the id they identify the observation on other devices (see
-        // merge_existing_observation). updated_at is bound as a UTC timestamp, like the
-        // import code does, because it decides which copy wins during sync.
+        // student_id, author_id and source_device_id stay untouched; created_at only changes
+        // when explicitly given (the uuid, not created_at, identifies the row on other
+        // devices). updated_at is bound as a UTC timestamp, like the import code does,
+        // because it decides which copy wins during sync.
         let result = sqlx::query(
-            "UPDATE observations SET category = ?, text = ?, tags = ?, updated_at = ?, modified_by_device = ? WHERE id = ? AND deleted_at IS NULL",
+            "UPDATE observations SET category = ?, text = ?, tags = ?, created_at = COALESCE(?, created_at), updated_at = ?, modified_by_device = ? WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(&category)
         .bind(&text)
         .bind(&tags_json)
+        .bind(new_created)
         .bind(self.now_ts())
         .bind(self.crypto.get_device_id())
         .bind(observation_id)
@@ -2742,6 +2801,116 @@ pub(crate) mod tests {
         // No additional row was created
         let observations = db.search_observations(None, None, None).await.unwrap();
         assert_eq!(observations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_observation_with_past_created_at() {
+        let (db, _temp_dir) = create_single_connection_test_db().await;
+        let original = create_test_observation(&db).await;
+
+        // Zeitzonen-Offset wird nach UTC umgerechnet und im Speicherformat abgelegt
+        let created = db
+            .create_observation_at(
+                original.student_id,
+                1,
+                "social".to_string(),
+                "Gestern beobachtet".to_string(),
+                vec![],
+                Some("2026-11-10T09:30:00+01:00".to_string()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(format_ts(created.created_at), "2026-11-10T08:30:00.000Z");
+        assert_ne!(created.updated_at, created.created_at);
+
+        // Ohne Angabe: jetzt, beide Zeitstempel gleich
+        assert_eq!(original.created_at, original.updated_at);
+
+        // Listen sortieren nach created_at
+        let all = db.search_observations(None, None, None).await.unwrap();
+        assert_eq!(all.last().unwrap().id, created.id);
+    }
+
+    #[tokio::test]
+    async fn test_observation_created_at_rejects_future_and_too_old() {
+        let (db, _temp_dir) = create_single_connection_test_db().await;
+        let observation = create_test_observation(&db).await;
+
+        let future = format_ts(db.now() + chrono::Duration::minutes(10));
+        let almost_now = format_ts(db.now() + chrono::Duration::minutes(2));
+        for bad in [future.as_str(), "1999-12-31T23:59:59Z", "kein Datum"] {
+            let result = db
+                .create_observation_at(
+                    observation.student_id,
+                    1,
+                    "social".to_string(),
+                    "Text".to_string(),
+                    vec![],
+                    Some(bad.to_string()),
+                )
+                .await;
+            assert!(result.is_err(), "{bad} muss abgelehnt werden");
+            let result = db
+                .update_observation_at(
+                    observation.id,
+                    "social".to_string(),
+                    "Text".to_string(),
+                    vec![],
+                    Some(bad.to_string()),
+                )
+                .await;
+            assert!(result.is_err(), "{bad} muss abgelehnt werden");
+        }
+        let message = db
+            .validate_created_at(&future)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("Zukunft"));
+        // Bis 5 Minuten Vorlauf (Uhrenabweichung) sind erlaubt
+        assert!(db.validate_created_at(&almost_now).is_ok());
+
+        // Abgelehnte Änderungen lassen die Zeile unberührt
+        let stored = db.get_observation(observation.id).await.unwrap().unwrap();
+        assert_eq!(stored.created_at, observation.created_at);
+        assert_eq!(stored.updated_at, observation.updated_at);
+        assert_eq!(db.search_observations(None, None, None).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_update_observation_changes_created_at_and_bumps_updated_at() {
+        let (db, _temp_dir) = create_single_connection_test_db().await;
+        let observation = create_test_observation(&db).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let updated = db
+            .update_observation_at(
+                observation.id,
+                observation.category.clone(),
+                observation.text.clone(),
+                vec!["original".to_string()],
+                Some("2026-11-01T07:15:00Z".to_string()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(format_ts(updated.created_at), "2026-11-01T07:15:00.000Z");
+        assert!(
+            updated.updated_at > observation.updated_at
+        );
+        assert_eq!(updated.modified_by_device, observation.modified_by_device);
+        assert_eq!(updated.source_device_id, observation.source_device_id);
+        assert_eq!(updated.uuid, observation.uuid);
+
+        // Ohne created_at bleibt der Erstellzeitpunkt stehen
+        let again = db
+            .update_observation(
+                observation.id,
+                "social".to_string(),
+                "Neuer Text".to_string(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(format_ts(again.created_at), "2026-11-01T07:15:00.000Z");
     }
 
     #[tokio::test]

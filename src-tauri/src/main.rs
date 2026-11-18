@@ -233,10 +233,11 @@ async fn create_observation(
     category: String,
     text: String,
     tags: Vec<String>,
+    created_at: Option<String>,
 ) -> Result<Observation, String> {
     let db = state.db.lock().await;
     let observation = db
-        .create_observation(student_id, 1, category, text, tags)
+        .create_observation_at(student_id, 1, category, text, tags, created_at)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -754,6 +755,7 @@ async fn update_observation(
     category: String,
     text: String,
     tags: Vec<String>,
+    created_at: Option<String>,
 ) -> Result<Observation, String> {
     let db = state.db.lock().await;
 
@@ -769,6 +771,11 @@ async fn update_observation(
 
     database::Database::validate_observation_content(&category, &text)
         .map_err(|e| e.to_string())?;
+    let new_created_at = created_at
+        .as_deref()
+        .map(|value| db.validate_created_at(value))
+        .transpose()
+        .map_err(|e| e.to_string())?;
 
     // Log the update attempt before personal data is changed. The details name the
     // changed fields only, so the audit log keeps no copy of the observation content.
@@ -782,6 +789,14 @@ async fn update_observation(
     let existing_tags = serde_json::from_str::<Vec<String>>(&existing.tags).ok();
     if existing_tags.as_ref() != Some(&tags) {
         changed_fields.push("tags");
+    }
+    if let Some(new) = &new_created_at {
+        let unchanged = sync_time::parse_ts(new)
+            .map(|parsed| parsed == existing.created_at)
+            .unwrap_or(false);
+        if !unchanged {
+            changed_fields.push("created_at");
+        }
     }
     let details = serde_json::json!({
         "student_id": existing.student_id,
@@ -800,7 +815,7 @@ async fn update_observation(
         .await
         .map_err(|e| e.to_string())?;
 
-    db.update_observation(observation_id, category, text, tags)
+    db.update_observation_at(observation_id, category, text, tags, created_at)
         .await
         .map_err(|e| e.to_string())
 }

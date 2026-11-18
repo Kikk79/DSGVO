@@ -199,6 +199,8 @@ interface AppState {
     category: string;
     text: string;
     tags: string[];
+    /** Erstellzeitpunkt (RFC 3339); ohne Angabe: jetzt. */
+    created_at?: string;
   }) => Promise<void>;
   // eslint-disable-next-line no-unused-vars
   searchObservations: (query?: string, student_id?: number, category?: string) => Promise<void>;
@@ -218,7 +220,10 @@ interface AppState {
   // eslint-disable-next-line no-unused-vars
   getObservation: (observation_id: number) => Promise<Observation | null>;
   // eslint-disable-next-line no-unused-vars
-  updateObservation: (observation_id: number, data: { category: string; text: string; tags: string[] }) => Promise<Observation>;
+  updateObservation: (
+    observation_id: number,
+    data: { category: string; text: string; tags: string[]; created_at?: string },
+  ) => Promise<Observation>;
   // eslint-disable-next-line no-unused-vars
   setError: (error: string | null) => void;
   // eslint-disable-next-line no-unused-vars
@@ -376,6 +381,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         category: data.category,
         text: data.text,
         tags: data.tags,
+        ...(data.created_at ? { createdAt: data.created_at } : {}),
       }) as any;
       
       // Transform observation to parse tags from JSON string to array
@@ -567,6 +573,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         category: data.category,
         text: data.text,
         tags: data.tags,
+        ...(data.created_at ? { createdAt: data.created_at } : {}),
       }) as any;
 
       // Transform observation to parse tags from JSON string to array

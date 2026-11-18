@@ -358,6 +358,19 @@ interface JoinedRow {
 function createHandlers(state: MockState) {
   const now = () => new Date().toISOString();
   const id = () => state.nextId++;
+  /** Wie im Backend: nicht vor 2000-01-01, höchstens 5 Minuten nach jetzt. */
+  const checkedCreatedAt = (value: string | null | undefined): string | undefined => {
+    if (value === undefined || value === null) return undefined;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) throw 'Das Datum der Beobachtung ist ungültig.';
+    if (parsed.getTime() < Date.UTC(2000, 0, 1)) {
+      throw 'Das Datum der Beobachtung darf nicht vor dem 1. Januar 2000 liegen.';
+    }
+    if (parsed.getTime() > Date.now() + 5 * 60_000) {
+      throw 'Das Datum der Beobachtung darf nicht in der Zukunft liegen.';
+    }
+    return parsed.toISOString();
+  };
 
   const joined = (): JoinedRow[] =>
     state.observations.flatMap((observation) => {
@@ -593,7 +606,8 @@ function createHandlers(state: MockState) {
 
     // --- Beobachtungen ----------------------------------------------------
     create_observation: (args) => {
-      const created = now();
+      const updated = now();
+      const created = checkedCreatedAt(arg<string | null>(args, 'createdAt')) ?? updated;
       const row: ObservationRow = {
         id: id(),
         student_id: required<number>(args, 'studentId'),
@@ -602,7 +616,7 @@ function createHandlers(state: MockState) {
         text: required<string>(args, 'text'),
         tags: JSON.stringify(arg<string[]>(args, 'tags') ?? []),
         created_at: created,
-        updated_at: created,
+        updated_at: updated,
         source_device_id: DEVICE_ID,
       };
       state.observations.push(row);
@@ -616,8 +630,10 @@ function createHandlers(state: MockState) {
       const tags = arg<string[]>(args, 'tags') ?? [];
       if (!text.trim()) throw 'Observation text must not be empty';
       if (!category.trim()) throw 'Observation category must not be empty';
+      const createdAt = checkedCreatedAt(arg<string | null>(args, 'createdAt'));
       const observation = findObservation(observationId);
       if (!observation) throw `Observation with id ${observationId} not found`;
+      if (createdAt) observation.created_at = createdAt;
       observation.category = category;
       observation.text = text;
       observation.tags = JSON.stringify(tags);

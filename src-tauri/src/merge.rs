@@ -1096,6 +1096,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_merge_propagates_changed_created_at() {
+        let (a, b, _d) = devices().await;
+        let (_c, _s, o) = seed(&a).await;
+        converge(&a, &b).await;
+
+        a.update_observation_at(
+            o.id,
+            o.category.clone(),
+            o.text.clone(),
+            vec!["x".into()],
+            Some("2026-10-05T12:00:00Z".into()),
+        )
+        .await
+        .unwrap();
+        exchange(&a, &b).await;
+
+        let on_b: String = sqlx::query_scalar("SELECT created_at FROM observations WHERE uuid = ?")
+            .bind(&o.uuid)
+            .fetch_one(b.pool())
+            .await
+            .unwrap();
+        assert_eq!(on_b, "2026-10-05T12:00:00.000Z");
+        converge(&a, &b).await;
+    }
+
+    #[tokio::test]
     async fn test_merge_equal_timestamp_tiebreak_is_symmetric() {
         let (a, b, _d) = devices().await;
         let (_c, _s, o) = seed(&a).await;

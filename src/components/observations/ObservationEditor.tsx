@@ -5,13 +5,14 @@ import { useAppStore } from '../../stores/appStore';
 import { bumpDataVersion } from '../../stores/uiStore';
 import { isEdited, type ObservationView } from '../../lib/observations';
 import { errorMessage } from '../../lib/errors';
+import { format, isValid } from 'date-fns';
 import { formatDate, formatDateLong, formatTime } from '../../lib/format';
 import { parseTags } from '../../lib/tags';
 import { cx } from '../../lib/cx';
 import { Button } from '../ui/Button';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { Dialog } from '../ui/Dialog';
-import { FieldError } from '../ui/Field';
+import { Field, FieldError } from '../ui/Field';
 import { Input } from '../ui/Input';
 import { TagChip } from '../ui/TagChip';
 import { Textarea } from '../ui/Textarea';
@@ -33,7 +34,13 @@ interface FormErrors {
   student?: string;
   category?: string;
   text?: string;
+  createdAt?: string;
 }
+
+const LOCAL_INPUT_PATTERN = "yyyy-MM-dd'T'HH:mm";
+
+/** Wert für `<input type="datetime-local">` in Ortszeit, auf die Minute genau. */
+const toLocalInput = (value: Date) => (isValid(value) ? format(value, LOCAL_INPUT_PATTERN) : '');
 
 const sameTags = (a: string[], b: string[]) => a.length === b.length && a.every((tag, index) => tag === b[index]);
 
@@ -57,6 +64,7 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
       category: observation?.category ?? '',
       text: observation?.text ?? '',
       tags: observation?.tags ?? [],
+      createdAt: toLocalInput(observation ? new Date(observation.createdAt) : new Date()),
     }),
     [observation, initialStudentId],
   );
@@ -65,6 +73,7 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
   const [category, setCategory] = useState(initial.category);
   const [text, setText] = useState(initial.text);
   const [tags, setTags] = useState<string[]>(initial.tags);
+  const [createdAt, setCreatedAt] = useState(initial.createdAt);
   const [tagDraft, setTagDraft] = useState('');
   const [errors, setErrors] = useState<FormErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -78,6 +87,7 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
   const studentInputId = useId();
   const studentErrorId = useId();
   const categoryErrorId = useId();
+  const createdAtId = useId();
   const textId = useId();
   const textHintId = useId();
   const textErrorId = useId();
@@ -106,8 +116,12 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
   }, [categories, initial.category, isEdit, observation]);
 
   const trimmedText = text.trim();
+  const createdAtChanged = createdAt !== initial.createdAt;
   const contentChanged =
-    category !== initial.category || trimmedText !== initial.text.trim() || !sameTags(tags, initial.tags);
+    category !== initial.category ||
+    trimmedText !== initial.text.trim() ||
+    !sameTags(tags, initial.tags) ||
+    createdAtChanged;
   const dirty = contentChanged || studentId !== initial.studentId || tagDraft.trim() !== '';
 
   const closeNow = useCallback(
@@ -133,6 +147,17 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
     if (!category) next.category = 'Bitte wählen Sie eine Kategorie aus.';
     if (trimmedText.length < MIN_TEXT_LENGTH) {
       next.text = `Bitte beschreiben Sie die Beobachtung mit mindestens ${MIN_TEXT_LENGTH} Zeichen.`;
+    }
+    // Nur prüfen, wenn der Wert neu ist: ein vorhandener Zeitpunkt bleibt unangetastet.
+    if (!isEdit || createdAtChanged) {
+      const chosen = new Date(createdAt);
+      if (!createdAt || !isValid(chosen)) {
+        next.createdAt = 'Bitte geben Sie Datum und Uhrzeit an.';
+      } else if (chosen.getTime() > Date.now()) {
+        next.createdAt = 'Datum und Uhrzeit dürfen nicht in der Zukunft liegen.';
+      } else if (chosen.getFullYear() < 2000) {
+        next.createdAt = 'Das Datum darf nicht vor dem Jahr 2000 liegen.';
+      }
     }
     return next;
   };
@@ -162,14 +187,29 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
       textRef.current?.focus();
       return;
     }
+    if (found.createdAt) {
+      document.getElementById(createdAtId)?.focus();
+      return;
+    }
 
     setSaving(true);
     try {
       if (isEdit) {
-        await updateObservation(observation.id, { category, text: trimmedText, tags });
+        await updateObservation(observation.id, {
+          category,
+          text: trimmedText,
+          tags,
+          ...(createdAtChanged ? { created_at: new Date(createdAt).toISOString() } : {}),
+        });
         toast.success('Änderungen gespeichert.');
       } else if (studentId !== null) {
-        await createObservation({ student_id: studentId, category, text: trimmedText, tags });
+        await createObservation({
+          student_id: studentId,
+          category,
+          text: trimmedText,
+          tags,
+          created_at: new Date(createdAt).toISOString(),
+        });
         toast.success('Beobachtung gespeichert.');
       }
       bumpDataVersion();
@@ -223,9 +263,12 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
   const quickTags: readonly string[] = QUICK_TAGS;
   const freeTags = tags.filter((tag) => !quickTags.includes(tag));
 
+  const chosenDate = new Date(createdAt);
+  const chosenValid = isValid(chosenDate);
   const description = isEdit ? (
     <>
-      Erfasst am {formatDate(observation.createdAt)} um {formatTime(observation.createdAt)} Uhr
+      Erfasst am {formatDate(chosenValid ? chosenDate : observation.createdAt)} um{' '}
+      {formatTime(chosenValid ? chosenDate : observation.createdAt)} Uhr
       {isEdited(observation) && observation.updatedAt && (
         <>
           {' · '}zuletzt bearbeitet am {formatDate(observation.updatedAt)} um {formatTime(observation.updatedAt)} Uhr
@@ -233,7 +276,7 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
       )}
     </>
   ) : (
-    formatDateLong(new Date())
+    formatDateLong(chosenValid ? chosenDate : new Date())
   );
 
   const leaveTo = (path: string) => (event: { preventDefault: () => void }) => {
@@ -312,6 +355,20 @@ export function ObservationEditor({ observation, initialStudentId, onClose }: Ob
               {errors.student && <FieldError id={studentErrorId}>{errors.student}</FieldError>}
             </div>
           )}
+
+          {/* Datum und Uhrzeit */}
+          <Field label="Datum und Uhrzeit" error={errors.createdAt} className="max-w-[16rem]">
+            <Input
+              id={createdAtId}
+              type="datetime-local"
+              value={createdAt}
+              max={toLocalInput(new Date())}
+              onChange={(event) => {
+                setCreatedAt(event.target.value);
+                if (errors.createdAt) setErrors((current) => ({ ...current, createdAt: undefined }));
+              }}
+            />
+          </Field>
 
           {/* Kategorie */}
           <fieldset aria-describedby={errors.category ? categoryErrorId : undefined}>

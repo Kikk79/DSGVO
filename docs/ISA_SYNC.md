@@ -53,6 +53,7 @@ Status-Werte: `offen` · `in Arbeit` · `umgesetzt` · `verworfen`
 | 2026-11-18 | Gesamtstand: Beobachtungen werden nur mit Schülern exportiert, die selbst in der Datei stehen (also mit vorhandener Klasse); übrige zählen als Waisen (`snapshot_orphan_counts`). Vorher scheiterte beim Empfänger das Zusammenführen des ganzen Laptop-Stands. |
 | 2026-11-18 | Startfehler der Datenbank (z.B. Umstellung bricht wegen unerwarteter Spalten ab): kein Panic mehr, sondern Fehlermeldung (Daten unverändert, Pfad der Datenbank), Erklärung als `schuelerbeobachtung-startfehler.txt` neben der Datenbank, Beenden mit Code 1. |
 | 2026-11-18 | Sicherungen aus dieser Version (`snapshot_v2`-Hülle) werden im Reiter „Daten“ erkannt und zusammengefasst (gezählt werden Einträge ohne Löschvermerk); alte `full_export`-Dateien bleiben lesbar. |
+| 2026-11-18 | Erstellzeitpunkt (`created_at`) einer Beobachtung ist beim Anlegen und Bearbeiten wählbar (`create_observation`/`update_observation`, optional `createdAt`, RFC 3339; nicht vor 2000-01-01, höchstens 5 Minuten nach Serverzeit). Eine Änderung zählt als Bearbeitung: `updated_at` und `modified_by_device` werden gesetzt, damit der Abgleich sie übernimmt (Zusammenführen kopiert `created_at`; die UUID bleibt unverändert). Audit-Eintrag nennt `created_at` in `changed_fields`, ohne Werte. |
 
 ## 4. Offene Fragen
 
