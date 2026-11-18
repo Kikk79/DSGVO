@@ -662,6 +662,337 @@ mod tests {
     // -----------------------------------------------------------------------------------------
     // Tests
 
+
+    // -----------------------------------------------------------------------------------------
+    // Probelauf der Umstellung (ISA §5)
+
+    /// Inhalt aller fachlichen Altspalten (Speichertyp inklusive) als Prüfsumme je Tabelle:
+    /// (Zeilenzahl, SHA-256).
+    async fn legacy_checksums(
+        path: &std::path::Path,
+    ) -> Vec<(&'static str, usize, String)> {
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite:{}", path.display()))
+            .unwrap()
+            .foreign_keys(false);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        let tables: [(&str, &str); 4] = [
+            ("classes", "id, name, school_year, created_at, updated_at, source_device_id"),
+            (
+                "students",
+                "id, class_id, first_name, last_name, status, created_at, updated_at, source_device_id",
+            ),
+            (
+                "categories",
+                "id, name, color, background_color, text_color, is_active, sort_order, created_at, updated_at, source_device_id",
+            ),
+            (
+                "observations",
+                "id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id",
+            ),
+        ];
+        let mut out = Vec::new();
+        for (t, cols) in tables {
+            let expr = cols
+                .split(", ")
+                .map(|c| format!("quote({})", c))
+                .collect::<Vec<_>>()
+                .join(" || char(31) || ");
+            let rows: Vec<String> =
+                sqlx::query_scalar(&format!("SELECT {} FROM {} ORDER BY id", expr, t))
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let mut h = Sha256::new();
+            for r in &rows {
+                h.update(r.as_bytes());
+                h.update([30u8]);
+            }
+            out.push((t, rows.len(), format!("{:x}", h.finalize())));
+        }
+        pool.close().await;
+        out
+    }
+
+    /// Realistische Altdatenbank: 3 Klassen, 30 Schüler (einer `deleted`), 8 Kategorien mit
+    /// eigenen Farben, 320 Beobachtungen mit gemischten Zeitstempelformaten.
+    async fn build_realistic_legacy_db(path: &std::path::Path) {
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite:{}", path.display()))
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(false);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        for sql in crate::database::tests::sync_v2_migration::LEGACY_SCHEMA {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let ts = |i: usize| -> String {
+            let day = 1 + i % 27;
+            let hour = i % 24;
+            match i % 4 {
+                0 => format!("2025-10-{:02} {:02}:15:00", day, hour),
+                1 => format!("2025-10-{:02}T{:02}:15:00.123Z", day, hour),
+                2 => format!("2025-10-{:02}T{:02}:15:00+02:00", day, hour),
+                _ => format!("2025-10-{:02} {:02}:15:00.456", day, hour),
+            }
+        };
+        for c in 1..=3 {
+            sqlx::query("INSERT INTO classes (id, name, school_year, created_at, updated_at, source_device_id) VALUES (?,?,?,?,?,?)")
+                .bind(c as i64)
+                .bind(format!("{}a", 4 + c))
+                .bind("2025/26")
+                .bind(ts(c))
+                .bind(ts(c + 1))
+                .bind("laptop-1")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for s in 1..=30usize {
+            sqlx::query("INSERT INTO students (id, class_id, first_name, last_name, status, created_at, updated_at, source_device_id) VALUES (?,?,?,?,?,?,?,?)")
+                .bind(s as i64)
+                .bind(((s - 1) % 3 + 1) as i64)
+                .bind(format!("Vorname{}", s))
+                .bind(if s % 7 == 0 { format!("O'Brien-Ünal{}", s) } else { format!("Nachname{}", s) })
+                .bind(if s == 13 { "deleted" } else { "active" })
+                .bind(ts(s))
+                .bind(ts(s + 2))
+                .bind("laptop-1")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let colours = [
+            ("Sozial", "#10B981", "#D1FAE5", "#065F46"),
+            ("Fachlich", "#123456", "#ABCDEF", "#FEDCBA"),
+            ("Verhalten", "#F59E0B", "#FEF3C7", "#92400E"),
+            ("Förderung", "#8B5CF6", "#EDE9FE", "#5B21B6"),
+            ("Elterngespräch", "#EF4444", "#FEE2E2", "#7F1D1D"),
+            ("Lernstand", "#0EA5E9", "#E0F2FE", "#0C4A6E"),
+            ("Arbeitsverhalten", "#14B8A6", "#CCFBF1", "#134E4A"),
+            ("Sonstiges", "#6B7280", "#F3F4F6", "#374151"),
+        ];
+        for (i, (n, c, b, t)) in colours.iter().enumerate() {
+            sqlx::query("INSERT INTO categories (id, name, color, background_color, text_color, is_active, sort_order, created_at, updated_at, source_device_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
+                .bind((i + 1) as i64)
+                .bind(*n)
+                .bind(*c)
+                .bind(*b)
+                .bind(*t)
+                .bind(if *n == "Sonstiges" { 0 } else { 1 })
+                .bind((i + 1) as i64)
+                .bind(ts(i))
+                .bind(ts(i))
+                .bind("laptop-1")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for o in 1..=320usize {
+            sqlx::query("INSERT INTO observations (id, student_id, author_id, category, text, tags, created_at, updated_at, source_device_id) VALUES (?,?,?,?,?,?,?,?,?)")
+                .bind(o as i64)
+                .bind(((o - 1) % 30 + 1) as i64)
+                .bind(1i64)
+                .bind(colours[o % colours.len()].0)
+                .bind(format!("Beobachtung {} – „Text“ mit ' und\nZeilenumbruch", o))
+                .bind(if o % 5 == 0 { "[\"team\",\"a\"]" } else { "[]" })
+                .bind(ts(o))
+                .bind(ts(o + 3))
+                .bind(if o % 10 == 0 { "desktop-old" } else { "laptop-1" })
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Probelauf der Umstellung; mit --ignored --nocapture ausführen"]
+    async fn test_rehearsal_migration_300_observations() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.db");
+        build_realistic_legacy_db(&path).await;
+        let before = legacy_checksums(&path).await;
+        assert_eq!(before[3].1, 320);
+
+        // Umstellung beim Öffnen
+        let t0 = std::time::Instant::now();
+        let db = Database::open_for_test(&path, "laptop-1", 0).await.unwrap();
+        let migrate_ms = t0.elapsed().as_millis();
+        db.set_device_role("laptop").await.unwrap();
+
+        // Zeilenzahlen und Inhalt aller fachlichen Altspalten unverändert
+        let after = legacy_checksums(&path).await;
+        assert_eq!(before, after, "Inhalt nach Umstellung verändert");
+        for (t, n, sum) in &after {
+            println!("MIGRATION {t}: {n} Zeilen, sha256 {sum}");
+        }
+        // Eindeutige UUID in jeder Zeile
+        for t in ["classes", "students", "categories", "observations"] {
+            let (total, distinct): (i64, i64) = sqlx::query_as(&format!(
+                "SELECT COUNT(*), COUNT(DISTINCT uuid) FROM {t} WHERE uuid IS NOT NULL AND uuid <> ''"
+            ))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            let rows: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {t}"))
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+            assert_eq!((total, distinct), (rows, rows), "{t}");
+        }
+        let deleted_students: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM students WHERE status = 'deleted'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(deleted_students, 1);
+
+        // Sicherungskopie existiert, lässt sich öffnen und entspricht dem Vorzustand
+        let baks: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                let n = p.file_name().unwrap().to_string_lossy().to_string();
+                n.contains(".vor-sync-v2-") && n.ends_with(".bak")
+            })
+            .collect();
+        assert_eq!(baks.len(), 1);
+        assert_eq!(legacy_checksums(&baks[0]).await, before, ".bak weicht vom Vorzustand ab");
+        println!(
+            "MIGRATION Dauer {} ms, .bak {} Bytes",
+            migrate_ms,
+            std::fs::metadata(&baks[0]).unwrap().len()
+        );
+
+        // Laptop -> Desktop über den Fake-WebDAV
+        let laptop = Device {
+            db: Mutex::new(db),
+            dir,
+        };
+        let desktop = device("desktop-1", Some("desktop")).await;
+        desktop.seed("alt", "Veraltet", "veraltet").await;
+        let dav = FakeDav::start().await;
+        let t1 = std::time::Instant::now();
+        synced(laptop.sync(&dav).await.unwrap());
+        let up_ms = t1.elapsed().as_millis();
+        let size = dav.get("snapshot_laptop-1.json").unwrap().len();
+        let t2 = std::time::Instant::now();
+        synced(desktop.sync(&dav).await.unwrap());
+        let down_ms = t2.elapsed().as_millis();
+        assert_eq!(desktop.rows().await, laptop.rows().await);
+        assert_eq!(desktop.observation_texts().await.len(), 320);
+        assert_eq!(desktop.backups().len(), 1);
+        let r = laptop.rows().await;
+        println!(
+            "SYNC Laptop->Desktop: Gesamtstand {} Bytes, Hochladen {} ms, Desktop-Ersetzen {} ms; \
+             Zeilen cls {} / std {} / cat {} / obs {}",
+            size,
+            up_ms,
+            down_ms,
+            r.classes.len(),
+            r.students.len(),
+            r.categories.len(),
+            r.observations.len()
+        );
+        // Zweiter Lauf auf beiden Seiten: keine Änderung
+        let r1 = synced(laptop.sync(&dav).await.unwrap());
+        let r2 = synced(desktop.sync(&dav).await.unwrap());
+        assert_eq!(r1.inserted + r1.updated, 0);
+        assert_eq!(r2.inserted + r2.updated, 0);
+        assert_eq!(desktop.rows().await, laptop.rows().await);
+    }
+
+
+    // -----------------------------------------------------------------------------------------
+    // Echter WebDAV-Server (PROPFIND-Parsing, ETag, Date, MOVE)
+
+    /// Laptop/Desktop-Ablauf von `test_desktop_waits_then_replaces_once` plus Löschweitergabe
+    /// gegen den WebDAV-Server unter `url`. Eindeutige Geräte-IDs; Aufräumen am Ende.
+    async fn roundtrip_scenario(url: &str) {
+        let stamp = chrono::Utc::now().timestamp_millis();
+        let lid = format!("laptop-e2e-{stamp}");
+        let did = format!("desktop-e2e-{stamp}");
+        let client = || WebDavClient::new(url.to_string(), "u".into(), "p".into());
+        let laptop = device(&lid, Some("laptop")).await;
+        let desktop = device(&did, Some("desktop")).await;
+        desktop.seed("alt", "Veraltet", "veraltet").await;
+        let sid = laptop.seed("5a", "Max", "vom Laptop").await;
+
+        let before = desktop.rows().await;
+        assert_eq!(
+            run_sync(&desktop.db, &client(), None).await.unwrap(),
+            SyncOutcome::WaitingForLaptop
+        );
+        assert_eq!(desktop.rows().await, before);
+
+        synced(run_sync(&laptop.db, &client(), None).await.unwrap());
+        // Serverzeit-Versatz aus dem echten Date-Header gespeichert und plausibel
+        assert!(laptop.db.lock().await.clock_offset_ms().abs() < 60_000);
+        synced(run_sync(&desktop.db, &client(), None).await.unwrap());
+        assert_eq!(desktop.rows().await, laptop.rows().await);
+        assert_eq!(desktop.observation_texts().await, vec!["vom Laptop".to_string()]);
+        assert_eq!(desktop.backups().len(), 1);
+
+        // Zweiter Lauf: ETag unverändert -> nichts zu tun
+        let r = synced(run_sync(&desktop.db, &client(), None).await.unwrap());
+        assert_eq!(r.inserted + r.updated + r.tombstoned, 0);
+
+        // Desktop-Änderung kommt am Laptop an
+        {
+            let db = desktop.db.lock().await;
+            let s = db.get_students().await.unwrap()[0].id;
+            db.create_observation(s, 1, "Sozial".into(), "neu am Desktop".into(), vec![])
+                .await
+                .unwrap();
+        }
+        synced(run_sync(&desktop.db, &client(), None).await.unwrap());
+        synced(run_sync(&laptop.db, &client(), None).await.unwrap());
+        assert_eq!(
+            laptop.observation_texts().await,
+            vec!["neu am Desktop".to_string(), "vom Laptop".to_string()]
+        );
+
+        // Löschen am Laptop kommt am Desktop an
+        laptop.db.lock().await.delete_student(sid, true).await.unwrap();
+        synced(run_sync(&laptop.db, &client(), None).await.unwrap());
+        synced(run_sync(&desktop.db, &client(), None).await.unwrap());
+        assert!(desktop.db.lock().await.get_students().await.unwrap().is_empty());
+        assert_eq!(desktop.rows().await, laptop.rows().await);
+
+        // Aufräumen auf dem Server
+        for id in [&lid, &did] {
+            let _ = client().delete(&format!("snapshot_{id}.json")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip_scenario_against_fake_dav() {
+        let dav = FakeDav::start().await;
+        roundtrip_scenario(&dav.url).await;
+        assert!(dav.names().is_empty(), "Aufräumen: {:?}", dav.names());
+    }
+
+    #[tokio::test]
+    #[ignore = "braucht echten WebDAV-Server: SYNC_E2E_WEBDAV_URL=http://127.0.0.1:8765/ ..."]
+    async fn test_real_webdav_roundtrip() {
+        let Ok(url) = std::env::var("SYNC_E2E_WEBDAV_URL") else {
+            eprintln!("SYNC_E2E_WEBDAV_URL nicht gesetzt, übersprungen");
+            return;
+        };
+        roundtrip_scenario(&url).await;
+    }
+
     #[tokio::test]
     async fn test_laptop_then_desktop_end_to_end() {
         let dav = FakeDav::start().await;

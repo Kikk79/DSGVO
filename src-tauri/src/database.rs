@@ -1787,7 +1787,7 @@ impl Database {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tempfile::TempDir;
 
@@ -2965,7 +2965,7 @@ mod tests {
     // ============================================
     // Sync v2: Schema-Umstellung (Task 2, A10)
     // ============================================
-    mod sync_v2_migration {
+    pub(crate) mod sync_v2_migration {
         use super::*;
         use crate::sync_schema::{self, derived_uuid, MigrationOutcome};
         use sqlx::sqlite::SqliteConnectOptions;
@@ -2974,7 +2974,7 @@ mod tests {
         const SYNCED_TABLES: [&str; 4] = ["classes", "students", "categories", "observations"];
 
         /// Kopie der Schema-Texte vor Sync v2 (inkl. `categories.name UNIQUE`).
-        const LEGACY_SCHEMA: &[&str] = &[
+        pub(crate) const LEGACY_SCHEMA: &[&str] = &[
             r#"CREATE TABLE classes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
